@@ -58,13 +58,14 @@ type Profile struct {
 	Onboarded bool     `json:"onboarded"`
 }
 type State struct {
-	DeletedPlans []DeletedPlan `json:"deletedPlans,omitempty"`
-	GoalOrder    []string      `json:"goalOrder,omitempty"`
-	Plans        []Plan        `json:"plans"`
-	Version      int           `json:"version"`
-	Profile      Profile       `json:"profile"`
-	Tasks        []Task        `json:"tasks"`
-	Order        []string      `json:"order"`
+	Assistants   map[string]*DraftAssistant `json:"assistants,omitempty"`
+	DeletedPlans []DeletedPlan              `json:"deletedPlans,omitempty"`
+	GoalOrder    []string                   `json:"goalOrder,omitempty"`
+	Plans        []Plan                     `json:"plans"`
+	Version      int                        `json:"version"`
+	Profile      Profile                    `json:"profile"`
+	Tasks        []Task                     `json:"tasks"`
+	Order        []string                   `json:"order"`
 }
 type Suggestion struct {
 	Order      []string          `json:"order"`
@@ -195,13 +196,29 @@ func mimoForKey(key string) (AIConfig, error) {
 	}
 	return AIConfig{}, errors.New("这看起来不是 MiMo API Key。按量付费 Key 通常以 sk- 开头，Token Plan Key 通常以 tp- 开头")
 }
+
+// Existing MiMo keys keep their token and verified endpoint. Only the model
+// selection is normalized so every ATriage feature calls the same model.
+func normalizeMiMoModel(v AIConfig) AIConfig {
+	canonical, e := mimoForKey(v.APIKey)
+	if e != nil {
+		return v
+	}
+	v.Model = canonical.Model
+	v.Mode = canonical.Mode
+	if v.BaseURL == "" {
+		v.BaseURL = canonical.BaseURL
+	}
+	return v
+}
 func (a *App) config(id string) (AIConfig, AIConfigStatus, error) {
 	var nonce, sealed []byte
 	var mode, verified string
 	e := a.db.QueryRow("SELECT nonce,encrypted,mode,verified_at FROM ai_configs WHERE user_id=?", id).Scan(&nonce, &sealed, &mode, &verified)
 	if errors.Is(e, sql.ErrNoRows) {
 		if a.aiBase != "" && a.aiKey != "" && a.aiModel != "" {
-			return AIConfig{APIKey: a.aiKey, BaseURL: a.aiBase, Model: a.aiModel, Mode: "服务器默认"}, AIConfigStatus{Configured: true, Mode: "服务器默认", Model: a.aiModel}, nil
+			v := normalizeMiMoModel(AIConfig{APIKey: a.aiKey, BaseURL: a.aiBase, Model: a.aiModel, Mode: "服务器默认"})
+			return v, AIConfigStatus{Configured: true, Mode: v.Mode, Model: v.Model}, nil
 		}
 		return AIConfig{}, AIConfigStatus{}, nil
 	}
@@ -212,7 +229,8 @@ func (a *App) config(id string) (AIConfig, AIConfigStatus, error) {
 	if e != nil {
 		return AIConfig{}, AIConfigStatus{}, e
 	}
-	return v, AIConfigStatus{Configured: true, Mode: mode, Model: v.Model, VerifiedAt: verified}, nil
+	v = normalizeMiMoModel(v)
+	return v, AIConfigStatus{Configured: true, Mode: v.Mode, Model: v.Model, VerifiedAt: verified}, nil
 }
 func (a *App) saveConfig(id string, v AIConfig) error {
 	nonce, sealed, e := a.sealConfig(v)
@@ -234,6 +252,9 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	limit := int64(64 << 10)
 	if strings.HasPrefix(r.URL.Path, "/api/plans") {
 		limit = 256 << 10
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/assistant/") {
+		limit = 12 << 20
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	d := json.NewDecoder(r.Body)
@@ -642,7 +663,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if r.URL.Path == "/api/health" {
-		send(w, 200, map[string]any{"ok": true, "app": "ATriage", "version": "0.2.1", "aiConfigured": a.aiKey != "" && a.aiModel != "" && a.aiBase != ""})
+		send(w, 200, map[string]any{"ok": true, "app": "ATriage", "version": "0.3.0", "aiConfigured": a.aiKey != "" && a.aiModel != "" && a.aiBase != ""})
 		return
 	}
 	if r.URL.Path == "/api/register" || r.URL.Path == "/api/login" {
@@ -659,7 +680,9 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
-	case "/api/plans", "/api/plans/generate", "/api/plans/accept", "/api/plans/withdraw", "/api/plans/replan", "/api/plans/delete", "/api/plans/restore", "/api/plans/purge":
+	case "/api/assistant/chat", "/api/assistant/source", "/api/assistant/fetch", "/api/assistant/settings", "/api/assistant/apply", "/api/assistant/undo", "/api/assistant/dismiss":
+		a.draftAssistant(w, r, id)
+	case "/api/plans", "/api/plans/generate", "/api/plans/input", "/api/plans/accept", "/api/plans/withdraw", "/api/plans/replan", "/api/plans/delete", "/api/plans/restore", "/api/plans/purge":
 		a.plans(w, r, id)
 	case "/api/ai-config":
 		if r.Method == "GET" {
@@ -1057,6 +1080,6 @@ func main() {
 		addr = "127.0.0.1:8091"
 	}
 	fmt.Println("ATriage http://" + addr)
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 105 * time.Second, IdleTimeout: 60 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 195 * time.Second, IdleTimeout: 60 * time.Second}
 	log.Fatal(srv.ListenAndServe())
 }

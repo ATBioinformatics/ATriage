@@ -22,7 +22,9 @@ import {
 } from "lucide-react";
 import "./style.css";
 import { Planner, type Plan } from "./Planner";
+import type { AssistantData } from "./DraftAssistant";
 import { goalView } from "./goal-view";
+import { normalizePlanInput } from "./plan-input";
 import { PBadge, pLevels } from "./p-level";
 
 type Task = {
@@ -52,6 +54,7 @@ type Profile = {
   onboarded: boolean;
 };
 type State = {
+  assistants?: Record<string, AssistantData>;
   deletedPlans?: {plan: Plan}[];
   goalOrder?: string[];
   plans?: Plan[];
@@ -138,8 +141,10 @@ async function api<T>(
   path: string,
   body?: unknown,
   method = "POST",
+  signal?: AbortSignal,
 ): Promise<T> {
   const r = await fetch("/api" + path, {
+    signal,
     method: body === undefined ? "GET" : method,
     headers: body === undefined ? {} : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -204,12 +209,22 @@ function App() {
       setState(null);
     }
   }
-  async function write<T>(fn: () => Promise<T>): Promise<T | undefined> {
+  async function write<T>(
+    fn: () => Promise<T>,
+    rethrow = false,
+  ): Promise<T | undefined> {
     setBusy(true);
     try {
       return await fn();
     } catch (e) {
-      await failure(e);
+      if (e instanceof DOMException && e.name === "AbortError") {
+        try {
+          adopt(await api<State>("/state"));
+        } catch {}
+      } else {
+        await failure(e);
+      }
+      if (rethrow) throw e;
     } finally {
       setBusy(false);
     }
@@ -239,6 +254,7 @@ function App() {
     }
   }
   async function saveTask(t: Task) {
+    const generation = session.current;
     const s = live.current;
     if (!s) return false;
     const r = await write(() =>
@@ -248,12 +264,28 @@ function App() {
         t.id ? "PUT" : "POST",
       ),
     );
-    if (!r) return false;
+    if (!r || generation !== session.current) return false;
     adopt(r.state);
     if (!t.id) {
       setOpenPlan({id: "", key: Date.now(), sourceTaskId: r.taskId});
       setView("plans");
-      setMessage("大目标已保存，可以开始拆解；暂不拆解也会参与 AI 重排。");
+      setMessage("大目标已保存，正在自动生成行动路径、初步排期与 P0—P3 优先级……");
+      const input = normalizePlanInput({
+        goal: {detail: t.title}, current: {detail: t.notes || ""},
+        timing: {detail: t.deadline ? `目标截止：${t.deadline}` : ""},
+      });
+      const planned = await write(() => api<State>("/plans/generate", {
+        version: r.state.version, sourceTaskId: r.taskId, input,
+      }));
+      if (generation !== session.current) return true;
+      if (planned) {
+        adopt(planned);
+        const plan = planned.plans?.find(p => p.sourceTaskId === r.taskId);
+        if (plan) {
+          setOpenPlan({id: plan.id, key: Date.now()});
+          setMessage("行动路径、初步排期与 P0—P3 已生成。请检查草案，六个方向可随时补充。");
+        }
+      }
     }
     return true;
   }
@@ -359,7 +391,7 @@ function App() {
           我的待办<span>{visibleCount}</span>
         </button>
         <button className={"nav " + (view === "plans" ? "selected" : "")} onClick={() => setView("plans")}>
-          <Sparkles size={19} />目标计划<span>v0.2</span>
+          <Sparkles size={19} />目标计划<span>v0.3</span>
         </button>
         <button
           className={"nav " + (view === "archive" ? "selected" : "")}
@@ -448,7 +480,7 @@ function App() {
                     : view === "plans" ? "梳理行动路径，安排投入，把握需要你介入的节点。" : "完成与决定不做分别保存，随时可以恢复。"}
               </p>
             </div>
-            <span className="edition">ATriage / v0.2</span>
+            <span className="edition">ATriage / v0.3</span>
           </div>
           {view !== "api" && view !== "plans" && (
             <>
@@ -513,9 +545,26 @@ function App() {
             />
           )}
           <div hidden={view !== "plans"}>
-            <Planner deletedPlans={state.deletedPlans || []} editTask={id => {const t = state.tasks.find(t => t.id === id); if (t) setEditing({...t});}} openRequest={openPlan} plans={state.plans || []} tasks={state.tasks} busy={busy} configured={!!aiConfig?.configured} configure={() => setView("api")} run={async (path, body, method) => {
+            <Planner assistants={state.assistants || {}} version={state.version} deletedPlans={state.deletedPlans || []} editTask={id => {const t = state.tasks.find(t => t.id === id); if (t) setEditing({...t});}} openRequest={openPlan} plans={state.plans || []} tasks={state.tasks} busy={busy} configured={!!aiConfig?.configured} configure={() => setView("api")} run={async (path, body, method, signal) => {
               const generation = session.current;
-              const result = await write(() => api<State>(path, { ...(body as object), version: live.current!.version }, method));
+              const result = await write(async () => {
+                const latest = await api<State>("/state", undefined, "POST", signal);
+                live.current = latest;
+                adopt(latest);
+                const next = await api<State>(path, { ...(body as object), version: latest.version }, method, signal);
+                live.current = next;
+                adopt(next);
+                if (path === "/assistant/chat" && (body as { autoApply?: boolean }).autoApply) {
+                  const planId = (body as { planId: string }).planId;
+                  const proposal = next.assistants?.[planId]?.proposal;
+                  if (proposal && !next.assistants?.[planId]?.error && next.plans?.find(p => p.id === planId)?.status === "draft" && !signal?.aborted) {
+                    const applied = await api<State>("/assistant/apply", { version: next.version, planId, proposalId: proposal.id }, "POST", signal);
+                    live.current = applied;
+                    return applied;
+                  }
+                }
+                return next;
+              }, true);
               if (result && generation === session.current) { adopt(result); return result.plans || []; }
             }} />
           </div>
@@ -913,7 +962,7 @@ function Auth({
             </div>
           </div>
         </div>
-        <small>ATriage v0.2 · 为有判断力的人提供行动建议</small>
+        <small>ATriage v0.3 · 为有判断力的人提供行动建议</small>
       </section>
       <section className="auth-form">
         <div>

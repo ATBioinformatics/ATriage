@@ -26,36 +26,48 @@ type PlanInput struct {
 	Resources PlanField `json:"resources"`
 	Outcome   PlanField `json:"outcome"`
 }
+
+// InputHistory preserves the basis used for an earlier round of planning when
+// the user later adjusts one or more of the six directions.
+type PlanInputRevision struct {
+	Created string    `json:"created"`
+	Input   PlanInput `json:"input"`
+}
 type PlanNode struct {
-	PLevel      string   `json:"pLevel,omitempty"`
-	ID          string   `json:"id"`
-	Title       string   `json:"title"`
-	Deliverable string   `json:"deliverable"`
-	Days        int      `json:"days"`
-	WaitDays    int      `json:"waitDays"`
-	DependsOn   []string `json:"dependsOn"`
-	Priority    string   `json:"priority"`
-	Mode        string   `json:"mode"`
-	Owner       string   `json:"owner"`
-	Reason      string   `json:"reason"`
-	Start       int      `json:"start"`
-	End         int      `json:"end"`
-	Critical    bool     `json:"critical"`
+	Hours         float64  `json:"hours,omitempty"`
+	HoursHigh     float64  `json:"hoursHigh,omitempty"`
+	EstimateBasis string   `json:"estimateBasis,omitempty"`
+	Refs          []string `json:"refs,omitempty"`
+	PLevel        string   `json:"pLevel,omitempty"`
+	ID            string   `json:"id"`
+	Title         string   `json:"title"`
+	Deliverable   string   `json:"deliverable"`
+	Days          int      `json:"days"`
+	WaitDays      int      `json:"waitDays"`
+	DependsOn     []string `json:"dependsOn"`
+	Priority      string   `json:"priority"`
+	Mode          string   `json:"mode"`
+	Owner         string   `json:"owner"`
+	Reason        string   `json:"reason"`
+	Start         int      `json:"start"`
+	End           int      `json:"end"`
+	Critical      bool     `json:"critical"`
 }
 type Plan struct {
-	History      []PlanRevision `json:"history,omitempty"`
-	SourceTaskID string         `json:"sourceTaskId,omitempty"`
-	ID           string         `json:"id"`
-	Input        PlanInput      `json:"input"`
-	Title        string         `json:"title"`
-	Summary      string         `json:"summary"`
-	Assumptions  []string       `json:"assumptions"`
-	Questions    []string       `json:"questions"`
-	Nodes        []PlanNode     `json:"nodes"`
-	Status       string         `json:"status"`
-	Created      string         `json:"created"`
-	Source       string         `json:"source"`
-	TotalDays    int            `json:"totalDays"`
+	History      []PlanRevision      `json:"history,omitempty"`
+	InputHistory []PlanInputRevision `json:"inputHistory,omitempty"`
+	SourceTaskID string              `json:"sourceTaskId,omitempty"`
+	ID           string              `json:"id"`
+	Input        PlanInput           `json:"input"`
+	Title        string              `json:"title"`
+	Summary      string              `json:"summary"`
+	Assumptions  []string            `json:"assumptions"`
+	Questions    []string            `json:"questions"`
+	Nodes        []PlanNode          `json:"nodes"`
+	Status       string              `json:"status"`
+	Created      string              `json:"created"`
+	Source       string              `json:"source"`
+	TotalDays    int                 `json:"totalDays"`
 }
 
 // Link legacy imported goals only when both sides are unambiguous. The ID then
@@ -131,6 +143,9 @@ func schedulePlan(p *Plan) error {
 	index := map[string]int{}
 	for i := range p.Nodes {
 		n := &p.Nodes[i]
+		if n.Hours < 0 || n.Hours > 2000 || n.HoursHigh < n.Hours || n.HoursHigh > 2000 || len(n.EstimateBasis) > 3000 || len(n.Refs) > 100 {
+			return errors.New("小时估算、依据或资料引用无效")
+		}
 		if !validPLevel(n.PLevel) {
 			return errors.New("P级必须为 P0、P1、P2、P3 或未评定")
 		}
@@ -300,6 +315,11 @@ dependsOn 只引用本计划编号，不能循环。体现合理并行，不能�
 	if json.Unmarshal([]byte(raw), &p) != nil {
 		return p, errors.New("AI 规划格式无法读取，请重试")
 	}
+	for _, node := range p.Nodes {
+		if node.PLevel == "" || !validPLevel(node.PLevel) {
+			return p, fmt.Errorf("AI 未完整评定行动 %s 的 P0—P3 优先级，结果未保存，请重试", node.ID)
+		}
+	}
 	p.Input = in
 	p.ID = uid()
 	p.Status = "draft"
@@ -335,6 +355,28 @@ func (a *App) plans(w http.ResponseWriter, r *http.Request, id string) {
 		PlanID       string    `json:"planId"`
 	}
 	if !decode(w, r, &q) {
+		return
+	}
+	if r.URL.Path == "/api/plans/input" {
+		if e := checkInput(&q.Input); e != nil {
+			fail(w, 400, e.Error())
+			return
+		}
+		s, e := a.update(id, q.Version, func(s *State) error {
+			for i := range s.Plans {
+				if s.Plans[i].ID != q.PlanID {
+					continue
+				}
+				old := &s.Plans[i]
+				old.InputHistory = append(old.InputHistory, PlanInputRevision{
+					Created: time.Now().UTC().Format(time.RFC3339Nano), Input: old.Input,
+				})
+				old.Input = q.Input
+				return nil
+			}
+			return errors.New("计划不存在或不属于当前账号")
+		})
+		updated(w, s, e)
 		return
 	}
 	if r.URL.Path == "/api/plans/generate" {
@@ -438,10 +480,24 @@ func (a *App) plans(w http.ResponseWriter, r *http.Request, id string) {
 				p.Created = old.Created
 				p.Source = old.Source
 				p.History = old.History
+				p.InputHistory = old.InputHistory
 				p.History = append(p.History, PlanRevision{Kind: "edit", Created: time.Now().UTC().Format(time.RFC3339Nano), Nodes: old.Nodes})
 				p.Status = "draft"
-				if e := schedulePlan(&p); e != nil {
+				if e := scheduleEditableDraft(&p); e != nil {
 					return e
+				}
+				if d := s.Assistants[p.ID]; d != nil {
+					d.Proposal = nil
+					kept := []string{}
+					for _, locked := range d.Locked {
+						for _, n := range p.Nodes {
+							if n.ID == locked {
+								kept = append(kept, locked)
+								break
+							}
+						}
+					}
+					d.Locked = kept
 				}
 				s.Plans[i] = p
 				return nil
@@ -472,6 +528,9 @@ func (a *App) plans(w http.ResponseWriter, r *http.Request, id string) {
 				if n.Mode == "self" {
 					notes = strings.Replace(notes, "（尚未委派）", "", 1)
 				}
+				if n.Hours > 0 {
+					notes = fmt.Sprintf("目标：%s\n交付物：%s\n执行角色建议：%s\n分工理由：%s\n投入估算：%.1f—%.1f 小时；等待 %d 天。\n依据：%s\n仅本计划估算，不是截止承诺。", old.Title, n.Deliverable, n.Owner, n.Reason, n.Hours, n.HoursHigh, n.WaitDays, n.EstimateBasis)
+				}
 				t := Task{ID: ids[n.ID], Title: n.Title, Notes: notes, Zone: s.Profile.Zone, Priority: n.Priority, SuggestedPriority: n.Priority, Status: "open", Intent: intent, Created: time.Now().UTC().Format(time.RFC3339Nano), Reason: n.Reason, Source: "ai", PlanID: old.ID, NodeID: n.ID, Dependencies: deps}
 				if previous, ok := priorExecution(old, n.ID); ok {
 					t.Deadline, t.Zone, t.Created = previous.Deadline, previous.Zone, previous.Created
@@ -492,6 +551,19 @@ func (a *App) plans(w http.ResponseWriter, r *http.Request, id string) {
 		return errors.New("计划不存在或不属于当前账号")
 	})
 	updated(w, s, e)
+}
+
+// An empty draft is an editable starting point, never an executable plan.
+func scheduleEditableDraft(p *Plan) error {
+	if len(p.Nodes) != 0 {
+		return schedulePlan(p)
+	}
+	if strings.TrimSpace(p.Title) == "" || utf8.RuneCountInString(p.Title) > 300 || utf8.RuneCountInString(p.Summary) > 3000 {
+		return errors.New("计划标题或说明无效")
+	}
+	p.Nodes = []PlanNode{}
+	p.TotalDays = 0
+	return nil
 }
 
 func blockedBy(s State, t Task) []string {

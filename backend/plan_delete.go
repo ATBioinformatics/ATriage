@@ -31,9 +31,10 @@ func purgeDeletedPlan(s *State, id, directory string) error {
 
 // The account recycle bin retains the full plan and execution records.
 type DeletedPlan struct {
-	Standalone bool   `json:"standalone,omitempty"`
-	Plan       Plan   `json:"plan"`
-	Tasks      []Task `json:"tasks"`
+	Assistant  *DraftAssistant `json:"assistant,omitempty"`
+	Standalone bool            `json:"standalone,omitempty"`
+	Plan       Plan            `json:"plan"`
+	Tasks      []Task          `json:"tasks"`
 }
 
 func deletePlan(s *State, id string) error {
@@ -63,6 +64,7 @@ func deletePlan(s *State, id string) error {
 	}
 	removed := map[string]bool{}
 	entry := DeletedPlan{Plan: p, Standalone: index < 0}
+	entry.Assistant = s.Assistants[id]
 	for _, task := range s.Tasks {
 		if task.PlanID == id || task.ID == p.SourceTaskID {
 			removed[task.ID] = true
@@ -99,6 +101,7 @@ func deletePlan(s *State, id string) error {
 	}
 	s.Tasks, s.Order, s.GoalOrder = tasks, order, goals
 	s.DeletedPlans = append(s.DeletedPlans, entry)
+	delete(s.Assistants, id)
 	if index >= 0 {
 		s.Plans = append(s.Plans[:index], s.Plans[index+1:]...)
 	}
@@ -121,6 +124,12 @@ func restoreDeletedPlan(s *State, id string) error {
 		}
 		if !entry.Standalone {
 			s.Plans = append(s.Plans, entry.Plan)
+		}
+		if entry.Assistant != nil {
+			if s.Assistants == nil {
+				s.Assistants = map[string]*DraftAssistant{}
+			}
+			s.Assistants[id] = entry.Assistant
 		}
 		s.Tasks = append(s.Tasks, entry.Tasks...)
 		for _, task := range entry.Tasks {

@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { describePlanField } from "./plan-input.ts";
+import { describePlanField, normalizePlanInput } from "./plan-input.ts";
+
+test("old null choices normalize into editable empty arrays", () => {
+  const input = normalizePlanInput({goal: {choices: null, detail: "目标原话"}, current: null});
+  assert.deepEqual(input.goal, {choices: [], detail: "目标原话"});
+  assert.deepEqual(input.current, {choices: [], detail: ""});
+  assert.deepEqual(input.outcome, {choices: [], detail: ""});
+});
 
 test("goal-only imported plans tolerate all six null choice arrays", () => {
   const fields = [{ choices: null, detail: "目标原话" }, ...Array.from({length:5}, () => ({ choices:null, detail:"" }))];

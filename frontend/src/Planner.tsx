@@ -6,9 +6,11 @@ import {
   GitBranch,
   CalendarDays,
   Check,
+  Trash2,
 } from "lucide-react";
 import "./planner.css";
-import { describePlanField } from "./plan-input";
+import {DraftAssistant, HourEstimate, HourTimeline, type AssistantData} from './DraftAssistant';
+import { describePlanField, normalizePlanInput } from "./plan-input";
 import { pLevels } from "./p-level";
 
 type Field = { choices: string[]; detail: string };
@@ -17,6 +19,10 @@ export type PlanInput = Record<
   Field
 >;
 export type PlanNode = {
+  hours?: number;
+  hoursHigh?: number;
+  estimateBasis?: string;
+  refs?: string[];
   pLevel?: string;
   id: string;
   title: string;
@@ -34,6 +40,7 @@ export type PlanNode = {
 };
 export type Plan = {
   history?: {created: string; kind: string; nodes: PlanNode[]; tasks?: {id: string; title: string; status: string; deadline?: string}[]}[];
+  inputHistory?: {created: string; input: PlanInput}[];
   sourceTaskId?: string;
   id: string;
   input: PlanInput;
@@ -48,6 +55,8 @@ export type Plan = {
   totalDays: number;
 };
 type Props = {
+  assistants: Record<string, AssistantData>;
+  version: number;
   deletedPlans: {plan: Plan}[];
   openRequest?: { id: string; key: number; sourceTaskId?: string };
   plans: Plan[];
@@ -60,8 +69,35 @@ type Props = {
     path: string,
     body: unknown,
     method?: string,
+    signal?: AbortSignal,
   ) => Promise<Plan[] | undefined>;
 };
+type DirectionFieldsProps = {
+  input: PlanInput;
+  setInput: (input: PlanInput) => void;
+  disabled: boolean;
+  idPrefix: string;
+};
+function DirectionFields({ input, setInput, disabled, idPrefix }: DirectionFieldsProps) {
+  return <div className="plan-input-grid">
+    {sections.map((s, i) => (
+      <fieldset key={s.key} disabled={disabled} className={s.key === "goal" ? "goal-field" : ""}>
+        <legend><span>{String(i + 1).padStart(2, "0")}</span> {s.title}</legend>
+        <p>{s.hint}</p>
+        <div className="plan-chips">
+          {s.choices.map((c) => (
+            <button type="button" key={c} aria-pressed={input[s.key].choices.includes(c)} onClick={() =>
+              setInput({...input, [s.key]: {...input[s.key], choices: input[s.key].choices.includes(c)
+                ? input[s.key].choices.filter((x) => x !== c) : [...input[s.key].choices, c]}})}>{c}</button>
+          ))}
+        </div>
+        <label htmlFor={`${idPrefix}-${s.key}`}>{s.key === "goal" ? "你的大目标（必填）" : "补充细节（可选）"}</label>
+        <input id={`${idPrefix}-${s.key}`} required={s.key === "goal"} maxLength={2000} value={input[s.key].detail}
+          placeholder={s.placeholder} onChange={(e) => setInput({...input, [s.key]: {...input[s.key], detail: e.target.value}})} />
+      </fieldset>
+    ))}
+  </div>;
+}
 const sections: {
   key: keyof PlanInput;
   title: string;
@@ -163,16 +199,20 @@ const freshInput = (): PlanInput => ({
 });
 
 export function Planner({
+  assistants,
+  version,
   deletedPlans,
   openRequest,
   editTask,
   plans,
   tasks,
-  busy,
+  busy: requestBusy,
   configured,
   configure,
   run,
 }: Props) {
+  const [assistantBusy,setAssistantBusy]=useState(false);
+  const busy=requestBusy||assistantBusy;
   const [input, setInput] = useState<PlanInput>(freshInput);
   const [sourceTaskId, setSourceTaskId] = useState("");
   const [screen, setScreen] = useState<"list" | "new" | "plan">("list");
@@ -181,12 +221,16 @@ export function Planner({
   const [visual, setVisual] = useState("network");
   const [notice, setNotice] = useState("");
   const [beforeRemoval, setBeforeRemoval] = useState<PlanNode[] | null>(null);
+  const [editingDirections, setEditingDirections] = useState(false);
+  const [directionInput, setDirectionInput] = useState<PlanInput>(freshInput);
   const open = (p: Plan) => {
     setDraft(structuredClone(p));
     setDirty(false);
     setScreen("plan");
     setNotice("");
     setBeforeRemoval(null);
+    setEditingDirections(false);
+    setDirectionInput(normalizePlanInput(p.input));
   };
   useEffect(() => {
     if (!openRequest) return;
@@ -235,12 +279,26 @@ export function Planner({
       setNotice("修改已保存，网络图与排期已重新计算。");
     }
   }
+  async function saveDirections() {
+    if (!draft) return;
+    const result = await run("/plans/input", {planId: draft.id, input: directionInput});
+    const saved = result?.find((p) => p.id === draft.id);
+    if (saved) {
+      open(saved);
+      setNotice(locked
+        ? "方向调整已保存。已加入待办的执行项未自动改动；如需按新方向重排，请先撤回为草案。"
+        : "方向调整已保存。可在检查环节后让 AI 按新方向重新编排。");
+    }
+  }
   async function replan() {
     if (!draft) return;
-    setNotice("AI 正在根据这些环节重新判断先后、并行、投入与分工……");
+    const empty = draft.nodes.length === 0;
+    setNotice(empty
+      ? "AI 正在根据目标重新生成一份行动路径与初步排期……"
+      : "AI 正在根据这些环节重新判断先后、并行、投入与分工……");
     const result = await run("/plans/replan", {plan: {...draft, history: undefined}});
     const saved = result?.find(p => p.id === draft.id);
-    if (saved) { open(saved); setNotice("AI 编排已保存为草案。环节清单已保留，任务网络与甘特图已更新，请检查后确认。"); }
+    if (saved) { open(saved); setNotice(empty ? "AI 已重新生成行动路径与初步排期，请检查后继续调整。" : "AI 编排已保存为草案。环节清单已保留，任务网络与甘特图已更新，请检查后确认。"); }
     else setNotice("本次编排未保存。你的编辑仍保留在这里，可以修改后重试。");
   }
   async function withdraw() {
@@ -268,6 +326,22 @@ export function Planner({
     }]});
     setDirty(true);
     setNotice(`已添加 ${id}。展开它可以修改名称、产出和分工，再让 AI 重新编排。`);
+  }
+  function removeNode(id: string) {
+    if (!draft) return;
+    setBeforeRemoval(structuredClone(draft.nodes));
+    setDraft({...draft, nodes: draft.nodes
+      .filter((node) => node.id !== id)
+      .map((node) => ({...node, dependsOn: node.dependsOn.filter((dependency) => dependency !== id)}))});
+    setDirty(true);
+    setNotice(`已删除 ${id}，可撤销这次删除。重新编排后再检查行动路径。`);
+  }
+  function removeAllNodes() {
+    if (!draft || !window.confirm(`删除全部 ${draft.nodes.length} 个任务？你可以立即撤销，或添加新的任务后再保存。`)) return;
+    setBeforeRemoval(structuredClone(draft.nodes));
+    setDraft({...draft, nodes: []});
+    setDirty(true);
+    setNotice("已删除全部任务。可撤销，或添加至少一个新任务后重新编排并保存。");
   }
   const locked = draft?.status === "accepted";
   return (
@@ -308,7 +382,7 @@ export function Planner({
                 <h3>{p.title}</h3>
                 <p>{p.summary}</p>
                 <small>
-                  {p.nodes.length} 个任务 · 估计 {p.totalDays} 天 ·{" "}
+                  {p.nodes.length} 个任务 · {p.nodes.some(n=>n.hours) ? '小时级工作量' : `估计 ${p.totalDays} 天`} ·{" "}
                   {new Date(p.created).toLocaleDateString("zh-CN")}
                 </small>
               </button>
@@ -344,60 +418,7 @@ export function Planner({
                 只需填写大目标。每项可点选，也可直接补充；不确定的内容原样写就好。
               </p>
             </div>
-            <div className="plan-input-grid">
-              {sections.map((s, i) => (
-                <fieldset
-                  key={s.key}
-                  disabled={busy}
-                  className={s.key === "goal" ? "goal-field" : ""}
-                >
-                  <legend>
-                    <span>{String(i + 1).padStart(2, "0")}</span> {s.title}
-                  </legend>
-                  <p>{s.hint}</p>
-                  <div className="plan-chips">
-                    {s.choices.map((c) => (
-                      <button
-                        type="button"
-                        key={c}
-                        aria-pressed={input[s.key].choices.includes(c)}
-                        onClick={() =>
-                          setInput({
-                            ...input,
-                            [s.key]: {
-                              ...input[s.key],
-                              choices: input[s.key].choices.includes(c)
-                                ? input[s.key].choices.filter((x) => x !== c)
-                                : [...input[s.key].choices, c],
-                            },
-                          })
-                        }
-                      >
-                        {c}
-                      </button>
-                    ))}
-                  </div>
-                  <label htmlFor={`plan-${s.key}`}>
-                    {s.key === "goal"
-                      ? "你的大目标（必填）"
-                      : "补充细节（可选）"}
-                  </label>
-                  <input
-                    id={`plan-${s.key}`}
-                    required={s.key === "goal"}
-                    maxLength={2000}
-                    value={input[s.key].detail}
-                    placeholder={s.placeholder}
-                    onChange={(e) =>
-                      setInput({
-                        ...input,
-                        [s.key]: { ...input[s.key], detail: e.target.value },
-                      })
-                    }
-                  />
-                </fieldset>
-              ))}
-            </div>
+            <DirectionFields input={input} setInput={setInput} disabled={busy} idPrefix="plan" />
             {!configured && (
               <div className="plan-notice">
                 生成粗拆需要连接 AI。
@@ -430,7 +451,7 @@ export function Planner({
         </>
       )}
       {screen === "plan" && draft && (
-        <>
+        <div className="plan-detail-with-assistant"><div className="plan-detail-content">
           <button
             className="text-button"
             disabled={busy || dirty}
@@ -455,8 +476,8 @@ export function Planner({
               <p>{draft.summary}</p>
             </div>
             <div className="plan-total">
-              <strong>{draft.totalDays}</strong>
-              <span>天 / 初步估算</span>
+              <strong>{draft.nodes.some(n=>n.hours) ? draft.nodes.reduce((v,n)=>v+(n.hours||0),0).toFixed(1) : draft.totalDays}</strong>
+              <span>{draft.nodes.some(n=>n.hours) ? '小时 / 估算下界' : '天 / 初步估算'}</span>
             </div>
           </div>
           <div className={"plan-edit-bar " + (locked ? "confirmed" : "draft") }>
@@ -477,14 +498,33 @@ export function Planner({
               </div>
             </>}
           </div>
-          <details className="plan-original">
-            <summary>查看原始输入 · 六个方向</summary>
+          <details className="plan-original" open={editingDirections}>
+            <summary>查看输入 · 六个方向</summary>
             {sections.map((s) => (
               <p key={s.key}>
                 <strong>{s.title}：</strong>
                 {describePlanField(draft.input?.[s.key])}
               </p>
             ))}
+            {!editingDirections && <button className="secondary plan-direction-button" disabled={busy} onClick={() => {
+              setDirectionInput(normalizePlanInput(draft.input));
+              setEditingDirections(true);
+            }}>调整六个方向</button>}
+            {editingDirections && <form className="plan-direction-editor" onSubmit={(e) => { e.preventDefault(); void saveDirections(); }}>
+              <p className="muted">可随时点选或补充方向。保存后保留本次调整前的输入记录。</p>
+              <DirectionFields input={directionInput} setInput={setDirectionInput} disabled={busy} idPrefix="direction" />
+              <div className="plan-edit-actions">
+                <button type="button" className="secondary" disabled={busy} onClick={() => setEditingDirections(false)}>取消</button>
+                <button className="primary" disabled={busy || !directionInput.goal.detail.trim()}>保存方向调整</button>
+              </div>
+            </form>}
+            {!!draft.inputHistory?.length && <details className="plan-input-history">
+              <summary>查看之前输入 · {draft.inputHistory.length} 次</summary>
+              {[...draft.inputHistory].reverse().map((revision, index) => <div key={revision.created}>
+                <p><strong>第 {draft.inputHistory!.length - index} 次调整前</strong></p>
+                {sections.map((s) => <p key={s.key}><strong>{s.title}：</strong>{describePlanField(revision.input?.[s.key])}</p>)}
+              </div>)}
+            </details>}
           </details>
           <div className="plan-caveats">
             <div>
@@ -528,15 +568,20 @@ export function Planner({
             </div>
           </div>
           <p className="muted">
+            {draft.nodes.some(n=>n.hours) ? '小时工作量与日历时间分别估算；图中箭头表示任务依赖。' : <>
             从第 1
             天起算，未映射到日历。按每天投入一天估算；同一执行角色的投入不重叠，等待期可并行。仅计算本计划，不含现有待办、节假日和跨计划容量。红色表示按依赖计算的关键路径，未宣称全局最优。
+            </>}
           </p>
+          <HourEstimate nodes={draft.nodes} weeklyHours={assistants[draft.id]?.weeklyHours||0}/>
           {dirty ? (
             <div className="plan-notice">
               环节已修改。点击“AI 重新编排行动路径与排期”生成新的任务网络与甘特图。
             </div>
           ) : visual === "network" ? (
             <Network nodes={draft.nodes} />
+          ) : draft.nodes.some(n=>n.hours) ? (
+            <HourTimeline nodes={draft.nodes} weeklyHours={assistants[draft.id]?.weeklyHours||0}/>
           ) : (
             <div className="plan-timeline">
               {draft.nodes.map((n) => (
@@ -562,7 +607,12 @@ export function Planner({
           )}
           <div className="plan-section-heading">
             <h2>逐项检查与分工</h2>
-            <span>{draft.nodes.length} 个任务</span>
+            <div className="plan-node-heading-actions">
+              <span>{draft.nodes.length} 个任务</span>
+              {!locked && <button className="secondary danger-button" disabled={busy || !draft.nodes.length} onClick={removeAllNodes}>
+                <Trash2 size={15} /> 删除全部任务
+              </button>}
+            </div>
           </div>
           <p className="muted">
             可以增删环节、修改名称和预期产出，再让 AI 重新编排依赖、工期与分工。执行者均为建议。
@@ -579,12 +629,19 @@ export function Planner({
               );
               return (
                 <details key={n.id} className="plan-node">
+                  {!locked && <button
+                    type="button"
+                    className="plan-node-delete"
+                    aria-label={`删除 ${n.id}：${n.title}`}
+                    disabled={busy}
+                    onClick={() => removeNode(n.id)}
+                  ><Trash2 size={16} /> 删除</button>}
                   <summary>
                     <b>{n.id}</b>
                     <span>
                       {task?.title || n.title}
                       <small>
-                        {modes[n.mode]} · {n.owner} · 投入 {n.days} 天 / 等待{" "}
+                        {modes[n.mode]} · {n.owner} · 投入 {n.hours ? `${n.hours}—${n.hoursHigh} 小时` : `${n.days} 天`} / 等待{" "}
                         {n.waitDays} 天
                       </small>
                     </span>
@@ -597,7 +654,7 @@ export function Planner({
                             : unmet.length
                               ? "等待前置任务"
                               : "可以开始"
-                        : n.critical
+                        : n.critical && !n.hours
                           ? "关键路径"
                           : ""}
                     </em>
@@ -627,17 +684,19 @@ export function Planner({
                         />
                       </label>
                       <label>
-                        投入天数
+                        {n.hours ? '投入小时下界' : '投入天数'}
                         <input
                           type="number"
-                          min={1}
-                          max={60}
-                          value={n.days}
+                          min={n.hours ? 0.1 : 1}
+                          max={n.hours ? 2000 : 60}
+                          step={n.hours ? 0.5 : 1}
+                          value={n.hours || n.days}
                           onChange={(e) =>
-                            changeNode(n.id, { days: Number(e.target.value) })
+                            changeNode(n.id, n.hours ? {hours:Number(e.target.value),hoursHigh:Math.max(n.hoursHigh||0,Number(e.target.value))} : { days: Number(e.target.value) })
                           }
                         />
                       </label>
+                      {!!n.hours&&<><label>投入小时上界<input type="number" min={n.hours} max={2000} step={0.5} value={n.hoursHigh} onChange={e=>changeNode(n.id,{hoursHigh:Number(e.target.value)})}/></label><label>估算依据<textarea value={n.estimateBasis||''} maxLength={900} onChange={e=>changeNode(n.id,{estimateBasis:e.target.value})}/></label></>}
                       <label>
                         等待天数
                         <input
@@ -731,12 +790,6 @@ export function Planner({
                         ))}
                     </div>
                   </fieldset>
-                  {!locked && <button className="secondary" disabled={busy || draft.nodes.length <= 1} onClick={() => {
-                    setBeforeRemoval(structuredClone(draft.nodes));
-                    setDraft({...draft, nodes: draft.nodes.filter(x => x.id !== n.id).map(x => ({...x, dependsOn: x.dependsOn.filter(id => id !== n.id)}))});
-                    setDirty(true);
-                    setNotice(`已移除 ${n.id}，可撤销移除。重新编排后再检查行动路径。`);
-                  }}>移除此环节</button>}
                 </details>
               );
             })}
@@ -776,7 +829,7 @@ export function Planner({
                     ? "有未保存修改，可直接交给 AI 重新编排。"
                     : "确认后开始执行；未改动的旧环节沿用进度，变更环节重新开始。"}
                 </span>
-                <button className="primary" disabled={busy || !configured || !draft.nodes.length} onClick={replan}><Sparkles size={16}/>AI 重新编排行动路径与排期</button>
+                <button className="primary" disabled={busy || !configured} onClick={replan}><Sparkles size={16}/>{draft.nodes.length ? "AI 重新编排行动路径与排期" : "AI 重新生成行动路径与排期"}</button>
                 <button
                   className="secondary"
                   disabled={busy || !dirty}
@@ -812,7 +865,7 @@ export function Planner({
               {!locked && <button className="secondary" disabled={busy} onClick={() => {setDraft({...draft, nodes: structuredClone(revision.nodes)}); setDirty(true); setBeforeRemoval(null); setNotice("历史环节已恢复到编辑区，请重新编排后保存。");}}>恢复此版本的环节</button>}
             </div>)}
           </details>}
-        </>
+        </div><DraftAssistant onBusy={setAssistantBusy} key={draft.id} plan={draft} data={assistants[draft.id]} version={version} busy={busy} dirty={dirty} configured={configured} run={run} adopt={open}/></div>
       )}
     </section>
   );
@@ -891,11 +944,11 @@ function Network({ nodes }: { nodes: PlanNode[] }) {
                 width="208"
                 height="96"
                 rx="10"
-                fill={n.critical ? "#fff6f1" : "#fff"}
-                stroke={n.critical ? "#c27859" : "#d3ded5"}
+                fill={n.critical && !n.hours ? "#fff6f1" : "#fff"}
+                stroke={n.critical && !n.hours ? "#c27859" : "#d3ded5"}
               />
               <text x="12" y="22" fontSize="11" fill="#758579">
-                {n.id} · 第 {n.start + 1}—{n.end} 天
+                {n.id} · {n.hours ? `${n.hours}—${n.hoursHigh} 小时` : `第 ${n.start+1}—${n.end} 天`}
               </text>
               <text x="12" y="45" fontSize="13" fill="#253731">
                 {n.title.length > 13 ? n.title.slice(0, 13) + "…" : n.title}
