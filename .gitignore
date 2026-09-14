@@ -1,0 +1,8 @@
+node_modules/
+frontend/dist/
+backend/data/
+backend/atriage.exe
+.env
+*.log
+*.tsbuildinfo
+.tmp/
