@@ -12,13 +12,19 @@ if (Test-Path -LiteralPath (Join-Path $projectRoot '.env')) {
 $bindAddress = if ($env:ADDR) { $env:ADDR } else { '127.0.0.1:8091' }
 $port = [int]($bindAddress.Split(':')[-1])
 $siteUrl = "http://127.0.0.1:$port"
+function Open-ATriage([object]$health) {
+    # The version query makes a browser request a fresh HTML entry point. The
+    # hashed assets referenced by it can still use their normal cache safely.
+    $version = if ($health.version) { [string]$health.version } else { 'current' }
+    Start-Process "$siteUrl/?v=$version"
+}
 $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
 if ($listener) {
     try {
         $health = Invoke-RestMethod -Uri "$siteUrl/api/health" -TimeoutSec 3
         if ($health.app -ne 'ATriage') { throw 'Another service is using this port.' }
-        if (!$NoBrowser) { Start-Process $siteUrl }
-        Write-Host "ATriage is already running: $siteUrl"
+        if (!$NoBrowser) { Open-ATriage $health }
+        Write-Host "ATriage is already running: $siteUrl (version $($health.version))"
         exit 0
     } catch {
         throw "Port $port is occupied. Change ADDR in .env or stop the other service."
@@ -42,7 +48,7 @@ try {
         Start-Sleep -Milliseconds 500
         if ($server.HasExited) { throw 'Server exited. See backend/server-error.log.' }
         try { $health = Invoke-RestMethod -Uri "$siteUrl/api/health" -TimeoutSec 1 } catch { continue }
-        if ($health.app -eq 'ATriage') { if (!$NoBrowser) { Start-Process $siteUrl }; Write-Host "ATriage is ready: $siteUrl (PID $($server.Id))"; exit 0 }
+        if ($health.app -eq 'ATriage') { if (!$NoBrowser) { Open-ATriage $health }; Write-Host "ATriage is ready: $siteUrl (version $($health.version), PID $($server.Id))"; exit 0 }
     }
     throw 'Server did not become ready. See backend/server-error.log.'
 } finally { Pop-Location }

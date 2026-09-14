@@ -32,18 +32,22 @@ import (
 )
 
 type Task struct {
-	ID                string `json:"id"`
-	Title             string `json:"title"`
-	Notes             string `json:"notes"`
-	Deadline          string `json:"deadline"`
-	Zone              string `json:"zone"`
-	Priority          string `json:"priority"`
-	SuggestedPriority string `json:"suggestedPriority"`
-	Status            string `json:"status"`
-	Intent            string `json:"intent"`
-	Created           string `json:"created"`
-	Reason            string `json:"reason"`
-	Source            string `json:"source"`
+	PLevel            string   `json:"pLevel,omitempty"`
+	PlanID            string   `json:"planId,omitempty"`
+	NodeID            string   `json:"nodeId,omitempty"`
+	Dependencies      []string `json:"dependencies,omitempty"`
+	ID                string   `json:"id"`
+	Title             string   `json:"title"`
+	Notes             string   `json:"notes"`
+	Deadline          string   `json:"deadline"`
+	Zone              string   `json:"zone"`
+	Priority          string   `json:"priority"`
+	SuggestedPriority string   `json:"suggestedPriority"`
+	Status            string   `json:"status"`
+	Intent            string   `json:"intent"`
+	Created           string   `json:"created"`
+	Reason            string   `json:"reason"`
+	Source            string   `json:"source"`
 }
 type Profile struct {
 	Name      string   `json:"name"`
@@ -54,10 +58,13 @@ type Profile struct {
 	Onboarded bool     `json:"onboarded"`
 }
 type State struct {
-	Version int      `json:"version"`
-	Profile Profile  `json:"profile"`
-	Tasks   []Task   `json:"tasks"`
-	Order   []string `json:"order"`
+	DeletedPlans []DeletedPlan `json:"deletedPlans,omitempty"`
+	GoalOrder    []string      `json:"goalOrder,omitempty"`
+	Plans        []Plan        `json:"plans"`
+	Version      int           `json:"version"`
+	Profile      Profile       `json:"profile"`
+	Tasks        []Task        `json:"tasks"`
+	Order        []string      `json:"order"`
 }
 type Suggestion struct {
 	Order      []string          `json:"order"`
@@ -71,6 +78,7 @@ type Window struct {
 	Until time.Time
 }
 type App struct {
+	recoveryDir            string
 	db                     *sql.DB
 	mu                     sync.Mutex
 	limits                 map[string]Window
@@ -119,7 +127,7 @@ func openApp(path string) (*App, error) {
 		db.Close()
 		return nil, e
 	}
-	return &App{db: db, limits: map[string]Window{}, client: &http.Client{Timeout: 90 * time.Second}, aiBase: strings.TrimRight(os.Getenv("AI_BASE_URL"), "/"), aiKey: os.Getenv("AI_API_KEY"), aiModel: os.Getenv("AI_MODEL"), secretKey: key}, nil
+	return &App{recoveryDir: filepath.Join(filepath.Dir(path), ".recovery-trash"), db: db, limits: map[string]Window{}, client: &http.Client{Timeout: 90 * time.Second}, aiBase: strings.TrimRight(os.Getenv("AI_BASE_URL"), "/"), aiKey: os.Getenv("AI_API_KEY"), aiModel: os.Getenv("AI_MODEL"), secretKey: key}, nil
 }
 
 func loadSecretKey(path string) ([]byte, error) {
@@ -223,7 +231,11 @@ func fail(w http.ResponseWriter, status int, s string) {
 	send(w, status, map[string]string{"error": s})
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	limit := int64(64 << 10)
+	if strings.HasPrefix(r.URL.Path, "/api/plans") {
+		limit = 256 << 10
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if d.Decode(v) != nil {
@@ -272,6 +284,9 @@ func (a *App) state(id string) (State, error) {
 		return s, e
 	}
 	e = json.Unmarshal([]byte(raw), &s)
+	if e == nil {
+		linkPlanSources(&s)
+	}
 	return s, e
 }
 
@@ -327,6 +342,9 @@ func deadline(t Task) (time.Time, error) {
 	return d, e
 }
 func validateTask(t Task) error {
+	if !validPLevel(t.PLevel) {
+		return errors.New("P级必须为 P0、P1、P2、P3 或未评定")
+	}
 	if strings.TrimSpace(t.Title) == "" || utf8.RuneCountInString(t.Title) > 300 {
 		return errors.New("任务描述需要 1–300 个字符")
 	}
@@ -624,7 +642,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if r.URL.Path == "/api/health" {
-		send(w, 200, map[string]any{"ok": true, "app": "ATriage", "aiConfigured": a.aiKey != "" && a.aiModel != "" && a.aiBase != ""})
+		send(w, 200, map[string]any{"ok": true, "app": "ATriage", "version": "0.2.1", "aiConfigured": a.aiKey != "" && a.aiModel != "" && a.aiBase != ""})
 		return
 	}
 	if r.URL.Path == "/api/register" || r.URL.Path == "/api/login" {
@@ -641,6 +659,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
+	case "/api/plans", "/api/plans/generate", "/api/plans/accept", "/api/plans/withdraw", "/api/plans/replan", "/api/plans/delete", "/api/plans/restore", "/api/plans/purge":
+		a.plans(w, r, id)
 	case "/api/ai-config":
 		if r.Method == "GET" {
 			_, status, e := a.config(id)
@@ -740,6 +760,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var q struct {
+			Scope   string   `json:"scope"`
 			Version int      `json:"version"`
 			Order   []string `json:"order"`
 		}
@@ -747,6 +768,13 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s, e := a.update(id, q.Version, func(s *State) error {
+			if q.Scope == "goals" {
+				if !permutation(q.Order, projectRankingState(*s)) {
+					return errors.New("排序必须包含全部当前大项目且不能重复")
+				}
+				s.GoalOrder = q.Order
+				return nil
+			}
 			if !permutation(q.Order, *s) {
 				return errors.New("排序必须包含全部待办且不能重复")
 			}
@@ -764,6 +792,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var q struct {
+			Scope   string `json:"scope"`
 			Version int    `json:"version"`
 			TaskID  string `json:"taskId"`
 		}
@@ -798,7 +827,15 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 		defer cancel()
-		v := a.suggest(ctx, s, config)
+		rankingState := s
+		if q.Scope == "goals" {
+			if q.TaskID != "" {
+				fail(w, 400, "项目排序不接受子任务插入")
+				return
+			}
+			rankingState = projectRankingState(s)
+		}
+		v := a.suggest(ctx, rankingState, config)
 		applied := false
 		if q.TaskID != "" {
 			ns, err := a.update(id, q.Version, func(s *State) error {
@@ -934,6 +971,7 @@ func (a *App) tasks(w http.ResponseWriter, r *http.Request, id string) {
 			return errors.New("协助意向无效")
 		}
 		if r.Method == "POST" {
+			t.PlanID, t.NodeID, t.Dependencies = "", "", nil
 			if len(s.Tasks) >= 2000 || len(s.Order) >= 200 {
 				return errors.New("首版最多保存 2000 条任务、200 条待办，请先归档部分任务")
 			}
@@ -953,6 +991,10 @@ func (a *App) tasks(w http.ResponseWriter, r *http.Request, id string) {
 		for i, old := range s.Tasks {
 			if old.ID != t.ID {
 				continue
+			}
+			t.PlanID, t.NodeID, t.Dependencies = old.PlanID, old.NodeID, old.Dependencies
+			if t.Status == "done" && old.Status != "done" && len(blockedBy(*s, old)) > 0 {
+				return errors.New("前置任务尚未完成，请先处理依赖任务；决定不做也不会自动解除依赖")
 			}
 			t.Created = old.Created
 			t.SuggestedPriority = old.SuggestedPriority
@@ -1003,6 +1045,11 @@ func main() {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
+		// index.html determines the hashed JS/CSS names; it must not remain stale
+		// after an application upgrade.
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		}
 		dist.ServeHTTP(w, r)
 	})
 	addr := os.Getenv("ADDR")
