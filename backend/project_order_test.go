@@ -36,3 +36,19 @@ func TestProjectRankingIncludesUndecomposedTaskWithoutDeadline(t *testing.T) {
 		t.Fatal("the missing deadline must remain missing for the AI to assess")
 	}
 }
+
+func TestGoalRemainsRankableAcrossDecomposition(t *testing.T) {
+	s := State{Tasks: []Task{{ID: "goal", Title: "新大目标", Status: "open"}}, Order: []string{"goal"}}
+	if !permutation([]string{"goal"}, projectRankingState(s)) {
+		t.Fatal("unplanned goal omitted")
+	}
+	s.Plans = []Plan{{ID: "plan", SourceTaskID: "goal", Status: "draft", Title: "拆解草案"}}
+	if !permutation([]string{"plan"}, projectRankingState(s)) {
+		t.Fatal("draft goal missing or duplicated")
+	}
+	s.Plans[0].Status = "accepted"
+	s.Tasks = append(s.Tasks, Task{ID: "child", PlanID: "plan", Status: "open"})
+	if !permutation([]string{"plan"}, projectRankingState(s)) {
+		t.Fatal("accepted goal missing or child included")
+	}
+}

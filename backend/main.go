@@ -32,6 +32,7 @@ import (
 )
 
 type Task struct {
+	PLevel            string   `json:"pLevel,omitempty"`
 	PlanID            string   `json:"planId,omitempty"`
 	NodeID            string   `json:"nodeId,omitempty"`
 	Dependencies      []string `json:"dependencies,omitempty"`
@@ -57,12 +58,13 @@ type Profile struct {
 	Onboarded bool     `json:"onboarded"`
 }
 type State struct {
-	GoalOrder []string `json:"goalOrder,omitempty"`
-	Plans     []Plan   `json:"plans"`
-	Version   int      `json:"version"`
-	Profile   Profile  `json:"profile"`
-	Tasks     []Task   `json:"tasks"`
-	Order     []string `json:"order"`
+	DeletedPlans []DeletedPlan `json:"deletedPlans,omitempty"`
+	GoalOrder    []string      `json:"goalOrder,omitempty"`
+	Plans        []Plan        `json:"plans"`
+	Version      int           `json:"version"`
+	Profile      Profile       `json:"profile"`
+	Tasks        []Task        `json:"tasks"`
+	Order        []string      `json:"order"`
 }
 type Suggestion struct {
 	Order      []string          `json:"order"`
@@ -76,6 +78,7 @@ type Window struct {
 	Until time.Time
 }
 type App struct {
+	recoveryDir            string
 	db                     *sql.DB
 	mu                     sync.Mutex
 	limits                 map[string]Window
@@ -124,7 +127,7 @@ func openApp(path string) (*App, error) {
 		db.Close()
 		return nil, e
 	}
-	return &App{db: db, limits: map[string]Window{}, client: &http.Client{Timeout: 90 * time.Second}, aiBase: strings.TrimRight(os.Getenv("AI_BASE_URL"), "/"), aiKey: os.Getenv("AI_API_KEY"), aiModel: os.Getenv("AI_MODEL"), secretKey: key}, nil
+	return &App{recoveryDir: filepath.Join(filepath.Dir(path), ".recovery-trash"), db: db, limits: map[string]Window{}, client: &http.Client{Timeout: 90 * time.Second}, aiBase: strings.TrimRight(os.Getenv("AI_BASE_URL"), "/"), aiKey: os.Getenv("AI_API_KEY"), aiModel: os.Getenv("AI_MODEL"), secretKey: key}, nil
 }
 
 func loadSecretKey(path string) ([]byte, error) {
@@ -339,6 +342,9 @@ func deadline(t Task) (time.Time, error) {
 	return d, e
 }
 func validateTask(t Task) error {
+	if !validPLevel(t.PLevel) {
+		return errors.New("P级必须为 P0、P1、P2、P3 或未评定")
+	}
 	if strings.TrimSpace(t.Title) == "" || utf8.RuneCountInString(t.Title) > 300 {
 		return errors.New("任务描述需要 1–300 个字符")
 	}
@@ -636,7 +642,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if r.URL.Path == "/api/health" {
-		send(w, 200, map[string]any{"ok": true, "app": "ATriage", "version": "0.2.0", "aiConfigured": a.aiKey != "" && a.aiModel != "" && a.aiBase != ""})
+		send(w, 200, map[string]any{"ok": true, "app": "ATriage", "version": "0.2.1", "aiConfigured": a.aiKey != "" && a.aiModel != "" && a.aiBase != ""})
 		return
 	}
 	if r.URL.Path == "/api/register" || r.URL.Path == "/api/login" {
@@ -653,7 +659,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
-	case "/api/plans", "/api/plans/generate", "/api/plans/accept", "/api/plans/withdraw", "/api/plans/replan":
+	case "/api/plans", "/api/plans/generate", "/api/plans/accept", "/api/plans/withdraw", "/api/plans/replan", "/api/plans/delete", "/api/plans/restore", "/api/plans/purge":
 		a.plans(w, r, id)
 	case "/api/ai-config":
 		if r.Method == "GET" {

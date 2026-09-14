@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import "./planner.css";
 import { describePlanField } from "./plan-input";
+import { pLevels } from "./p-level";
 
 type Field = { choices: string[]; detail: string };
 export type PlanInput = Record<
@@ -16,6 +17,7 @@ export type PlanInput = Record<
   Field
 >;
 export type PlanNode = {
+  pLevel?: string;
   id: string;
   title: string;
   deliverable: string;
@@ -46,9 +48,10 @@ export type Plan = {
   totalDays: number;
 };
 type Props = {
-  openRequest?: { id: string; key: number };
+  deletedPlans: {plan: Plan}[];
+  openRequest?: { id: string; key: number; sourceTaskId?: string };
   plans: Plan[];
-  tasks: { id: string; planId?: string; nodeId?: string; status: string; title?: string; deadline?: string }[];
+  tasks: { id: string; planId?: string; nodeId?: string; status: string; title?: string; deadline?: string; notes?: string }[];
   editTask: (id: string) => void;
   busy: boolean;
   configured: boolean;
@@ -160,6 +163,7 @@ const freshInput = (): PlanInput => ({
 });
 
 export function Planner({
+  deletedPlans,
   openRequest,
   editTask,
   plans,
@@ -170,6 +174,7 @@ export function Planner({
   run,
 }: Props) {
   const [input, setInput] = useState<PlanInput>(freshInput);
+  const [sourceTaskId, setSourceTaskId] = useState("");
   const [screen, setScreen] = useState<"list" | "new" | "plan">("list");
   const [draft, setDraft] = useState<Plan | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -189,6 +194,19 @@ export function Planner({
       setNotice("当前计划有未保存修改，请先保存，再从待办页打开目标。");
       return;
     }
+    if (openRequest.sourceTaskId) {
+      const source = tasks.find(t => t.id === openRequest.sourceTaskId);
+      if (!source) return;
+      const next = freshInput();
+      next.goal.detail = source.title || "";
+      next.current.detail = source.notes || "";
+      next.timing.detail = source.deadline ? `目标截止：${source.deadline}` : "";
+      setInput(next);
+      setSourceTaskId(source.id);
+      setScreen("new");
+      setNotice("");
+      return;
+    }
     const selected = plans.find(p => p.id === openRequest.id);
     if (selected) open(selected);
   }, [openRequest]);
@@ -201,10 +219,11 @@ export function Planner({
     setDirty(true);
   }
   async function generate() {
-    const result = await run("/plans/generate", { input });
+    const result = await run("/plans/generate", { input, sourceTaskId });
     if (result?.length) {
       open(result[result.length - 1]);
       setInput(freshInput());
+      setSourceTaskId("");
     }
   }
   async function save() {
@@ -265,7 +284,7 @@ export function Planner({
               <p>
                 写下目标，AI 帮你粗拆行动、梳理依赖，并建议你在哪些节点介入。
               </p>
-              <button className="primary" onClick={() => setScreen("new")}>
+              <button className="primary" onClick={() => { setInput(freshInput()); setSourceTaskId(""); setScreen("new"); }}>
                 <Plus size={17} />
                 创建目标计划
               </button>
@@ -295,6 +314,12 @@ export function Planner({
               </button>
             ))}
           </div>
+          {!!deletedPlans.length && <details><summary>大目标回收站 · {deletedPlans.length} 项</summary>
+            {deletedPlans.map(({plan}) => <div key={plan.id} className="plan-actions"><span>{plan.title}</span><button className="secondary" disabled={busy} onClick={async () => { await run("/plans/restore", {planId: plan.id}); }}>恢复大目标</button><button className="secondary" disabled={busy} onClick={async () => {
+              if (!window.confirm(`永久删除“${plan.title}”？删除后无法从应用恢复。程序会先保留一份本机恢复备份。`)) return;
+              await run("/plans/purge", {planId: plan.id});
+            }}>永久删除</button></div>)}
+          </details>}
         </>
       )}
       {screen === "new" && (
@@ -628,16 +653,15 @@ export function Planner({
                         />
                       </label>
                       <label>
-                        重要性
+                        执行优先级
                         <select
-                          value={n.priority}
+                          value={n.pLevel || ""}
                           onChange={(e) =>
-                            changeNode(n.id, { priority: e.target.value })
+                            changeNode(n.id, { pLevel: e.target.value })
                           }
                         >
-                          <option value="high">高</option>
-                          <option value="medium">中</option>
-                          <option value="low">低</option>
+                          <option value="">待评定</option>
+                          {Object.entries(pLevels).map(([level, description]) => <option key={level} value={level}>{level} · {description}</option>)}
                         </select>
                       </label>
                       <label>
@@ -733,6 +757,10 @@ export function Planner({
             </button>
           )}
           <div className="plan-actions">
+            <button className="secondary" disabled={busy} onClick={async () => {
+              const result = await run("/plans/delete", {planId: draft.id});
+              if (result) { setDraft(null); setDirty(false); setScreen("list"); setNotice("大目标及关联任务已移入回收站，可随时恢复。"); }
+            }}>删除大目标（移入回收站）</button>
             {locked ? (
               <>
               <p>

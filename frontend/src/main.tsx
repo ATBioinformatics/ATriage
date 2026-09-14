@@ -23,8 +23,10 @@ import {
 import "./style.css";
 import { Planner, type Plan } from "./Planner";
 import { goalView } from "./goal-view";
+import { PBadge, pLevels } from "./p-level";
 
 type Task = {
+  pLevel?: string;
   planId?: string;
   nodeId?: string;
   dependencies?: string[];
@@ -50,6 +52,7 @@ type Profile = {
   onboarded: boolean;
 };
 type State = {
+  deletedPlans?: {plan: Plan}[];
   goalOrder?: string[];
   plans?: Plan[];
   version: number;
@@ -162,7 +165,7 @@ function App() {
     [now, setNow] = useState(Date.now()),
     [query, setQuery] = useState("");
   const live = useRef(state);
-  const [openPlan, setOpenPlan] = useState<{id: string; key: number}>();
+  const [openPlan, setOpenPlan] = useState<{id: string; key: number; sourceTaskId?: string}>();
   live.current = state;
   const session = useRef(0);
   useEffect(() => {
@@ -247,7 +250,11 @@ function App() {
     );
     if (!r) return false;
     adopt(r.state);
-    if (!t.id) void suggest(r.state, r.taskId);
+    if (!t.id) {
+      setOpenPlan({id: "", key: Date.now(), sourceTaskId: r.taskId});
+      setView("plans");
+      setMessage("大目标已保存，可以开始拆解；暂不拆解也会参与 AI 重排。");
+    }
     return true;
   }
   async function move(id: string, index: number) {
@@ -506,7 +513,7 @@ function App() {
             />
           )}
           <div hidden={view !== "plans"}>
-            <Planner editTask={id => {const t = state.tasks.find(t => t.id === id); if (t) setEditing({...t});}} openRequest={openPlan} plans={state.plans || []} tasks={state.tasks} busy={busy} configured={!!aiConfig?.configured} configure={() => setView("api")} run={async (path, body, method) => {
+            <Planner deletedPlans={state.deletedPlans || []} editTask={id => {const t = state.tasks.find(t => t.id === id); if (t) setEditing({...t});}} openRequest={openPlan} plans={state.plans || []} tasks={state.tasks} busy={busy} configured={!!aiConfig?.configured} configure={() => setView("api")} run={async (path, body, method) => {
               const generation = session.current;
               const result = await write(() => api<State>(path, { ...(body as object), version: live.current!.version }, method));
               if (result && generation === session.current) { adopt(result); return result.plans || []; }
@@ -559,15 +566,19 @@ function App() {
                     <div className="goal-next-label">当前下一步{g.ready.length > 1 || g.preview.length > 1 ? " · 可并行推进" : ""}</div>
                     {g.ready.map(t => <div className="goal-next-action" key={t.id}>
                       <button className="icon" aria-label={`完成 ${t.title}`} disabled={busy} onClick={() => saveTask({...t, status: "done"})}><Circle size={19}/></button>
-                      <button className="goal-action-title" onClick={() => setEditing({...t})}>{t.nodeId} · {t.title}</button>
+                      <button className="goal-action-title" onClick={() => setEditing({...t})}>{t.nodeId} · {t.title} <PBadge level={t.pLevel}/></button>
                       <button className={"goal-action-date " + due(t, now)} onClick={() => setEditing({...t})}>{t.deadline ? `截止 ${t.deadline.replace("T", " ")}` : "设置行动截止日"}</button>
                     </div>)}
-                    {g.preview.map(n => <div className="goal-next-action" key={n.id}><span>{n.id} · {n.title}</span><small>待确认 · 截止日未设置</small></div>)}
+                    {g.preview.map(n => <div className="goal-next-action" key={n.id}><span>{n.id} · {n.title} <PBadge level={n.pLevel}/></span><small>待确认 · 截止日未设置</small></div>)}
                     {!g.ready.length && !g.preview.length && <p>{g.done === g.children.length && g.children.length ? "执行项已全部完成。" : "暂无可执行行动，请在计划中检查前置任务（跳过不等于完成）。"}</p>}
                   </section>;
                 })() : (
                   <TaskRow
                     key={item.task.id}
+                    remove={async () => {
+                      const result = await write(() => api<State>("/plans/delete", {version: live.current!.version, planId: item.task.id}));
+                      if (result) { adopt(result); setMessage("大目标已移入回收站，可在目标计划页面恢复。"); }
+                    }}
                     task={item.task}
                     blocked={(item.task.dependencies || []).filter(id => state.tasks.find(x => x.id === id)?.status !== "done").map(id => state.tasks.find(x => x.id === id)?.title || "前置任务")}
                     rank={projectItems.findIndex(x => x.id === item.id) + 1}
@@ -1352,6 +1363,7 @@ function TaskFields({
         </label>
       </div>
       <p className="field-hint">仅选日期时，按当天结束计算。时区：{t.zone}</p>
+      {t.planId && <label>执行优先级<select value={t.pLevel || ""} onChange={e => change({...t, pLevel: e.target.value})}><option value="">待评定</option>{Object.entries(pLevels).map(([level, description]) => <option key={level} value={level}>{level} · {description}</option>)}</select><small>P级与委派方式独立；P0也可由他人执行。</small></label>}
       <label>
         重要程度
         <select
@@ -1411,7 +1423,7 @@ function TaskComposer({
           onChange={(e) => setT({ ...t, title: e.target.value })}
         />
         <button className="primary" disabled={busy || !t.title.trim()}>
-          添加任务
+          添加大目标
           <ArrowUpRight size={16} />
         </button>
       </div>
@@ -1435,6 +1447,7 @@ function TaskComposer({
   );
 }
 function TaskRow({
+  remove,
   task: t,
   blocked,
   rank,
@@ -1445,6 +1458,7 @@ function TaskRow({
   edit,
   save,
 }: {
+  remove?: () => void;
   task: Task;
   blocked: string[];
   rank: number;
@@ -1613,6 +1627,7 @@ function TaskRow({
                 >
                   决定不做
                 </button>
+                {remove && <button disabled={busy} onClick={remove}>删除大目标（移入回收站）</button>}
               </>
             ) : (
               <button

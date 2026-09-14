@@ -27,6 +27,7 @@ type PlanInput struct {
 	Outcome   PlanField `json:"outcome"`
 }
 type PlanNode struct {
+	PLevel      string   `json:"pLevel,omitempty"`
 	ID          string   `json:"id"`
 	Title       string   `json:"title"`
 	Deliverable string   `json:"deliverable"`
@@ -130,6 +131,9 @@ func schedulePlan(p *Plan) error {
 	index := map[string]int{}
 	for i := range p.Nodes {
 		n := &p.Nodes[i]
+		if !validPLevel(n.PLevel) {
+			return errors.New("P级必须为 P0、P1、P2、P3 或未评定")
+		}
 		n.Title, n.Owner = strings.TrimSpace(n.Title), strings.TrimSpace(n.Owner)
 		if !nodeID.MatchString(n.ID) {
 			return errors.New("任务编号无效")
@@ -237,6 +241,8 @@ func (a *App) generatePlanWithNodes(ctx context.Context, in PlanInput, profile P
 		return p, errors.New("请先在 AI API 配置中连接 MiMo，再生成粗拆；你的输入会保留")
 	}
 	data := map[string]any{"input": in, "profile": profile, "now": time.Now().UTC().Format(time.RFC3339)}
+	pLevelInstructions := `
+每个node另需返回pLevel（P0/P1/P2/P3）。P0：不做会立即造成重大且难以补救的损失或中断核心目标，必须有明确后果和时间窗口证据，不得仅因重要或临近截止判为P0。P1：不做会显著削弱长期目标、能力积累或关键关系。P2：不做不损害主线，但做成能增加质量、差异化或亮点。P3：不做损失有限，当前投入回报较低、可延后。reason同时说明P级依据与分工依据，信息不足需说明。P级与mode独立，P0也可委派，不能因为可委派就判为P3。`
 	if fixed != nil {
 		data["userNodes"] = fixed.Nodes
 		data["title"] = fixed.Title
@@ -252,6 +258,7 @@ dependsOn 只引用本计划编号，不能循环。体现合理并行，不能�
 		system += `
 本次是基于用户已经编辑的环节重新编排，覆盖前述首次粗拆的数量和添加验收任务要求。必须逐字保留 userNodes 中每个 id、title、deliverable，且每项恰好出现一次，不得增添、删除、合并或拆开环节。只重建 dependsOn、days、waitDays、priority、mode、owner、reason 与计划解释。已有依赖与工期只是参考，须重新判断合理并行和先后顺序。若缺少验收等环节，在 questions 中建议用户补充，不要自行新增。若用户明确写了分工限制，必须遵守。不要输出历史执行记录。`
 	}
+	system += pLevelInstructions
 	params := map[string]any{"model": config.Model, "messages": []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": string(payload)}}, "temperature": 0.2, "max_completion_tokens": 10000}
 	if strings.HasPrefix(config.Model, "mimo-") {
 		params["thinking"] = map[string]string{"type": "disabled"}
@@ -321,10 +328,11 @@ func (a *App) plans(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	var q struct {
-		Version int       `json:"version"`
-		Input   PlanInput `json:"input"`
-		Plan    Plan      `json:"plan"`
-		PlanID  string    `json:"planId"`
+		SourceTaskID string    `json:"sourceTaskId"`
+		Version      int       `json:"version"`
+		Input        PlanInput `json:"input"`
+		Plan         Plan      `json:"plan"`
+		PlanID       string    `json:"planId"`
 	}
 	if !decode(w, r, &q) {
 		return
@@ -347,6 +355,23 @@ func (a *App) plans(w http.ResponseWriter, r *http.Request, id string) {
 			fail(w, 400, "最多保存 50 份目标计划")
 			return
 		}
+		if q.SourceTaskID != "" {
+			found := false
+			for _, task := range s.Tasks {
+				if task.ID == q.SourceTaskID && task.PlanID == "" && task.Status == "open" {
+					found = true
+				}
+			}
+			for _, plan := range s.Plans {
+				if plan.SourceTaskID == q.SourceTaskID {
+					found = false
+				}
+			}
+			if !found {
+				fail(w, 400, "大目标不存在或已有关联计划，请刷新后查看")
+				return
+			}
+		}
 		if !a.allow("ai:"+id, 10, time.Minute) {
 			fail(w, 429, "规划请求较多，请一分钟后重试")
 			return
@@ -367,6 +392,12 @@ func (a *App) plans(w http.ResponseWriter, r *http.Request, id string) {
 			if len(s.Plans) >= 50 {
 				return errors.New("最多保存 50 份目标计划")
 			}
+			p.SourceTaskID = q.SourceTaskID
+			for i, orderedID := range s.GoalOrder {
+				if orderedID == q.SourceTaskID {
+					s.GoalOrder[i] = p.ID
+				}
+			}
 			s.Plans = append(s.Plans, p)
 			linkPlanSources(s)
 			return nil
@@ -375,6 +406,15 @@ func (a *App) plans(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	s, e := a.update(id, q.Version, func(s *State) error {
+		if r.URL.Path == "/api/plans/purge" {
+			return purgeDeletedPlan(s, q.PlanID, a.recoveryDir)
+		}
+		if r.URL.Path == "/api/plans/restore" {
+			return restoreDeletedPlan(s, q.PlanID)
+		}
+		if r.URL.Path == "/api/plans/delete" {
+			return deletePlan(s, q.PlanID)
+		}
 		pid := q.PlanID
 		if r.URL.Path == "/api/plans" {
 			pid = q.Plan.ID
@@ -439,6 +479,7 @@ func (a *App) plans(w http.ResponseWriter, r *http.Request, id string) {
 						t.Status = previous.Status
 					}
 				}
+				t.PLevel = n.PLevel
 				s.Tasks = append(s.Tasks, t)
 				if t.Status == "open" {
 					s.Order = append(s.Order, t.ID)

@@ -2,6 +2,7 @@ node_modules/
 frontend/dist/
 backend/data/
 backend/atriage.exe
+backend/atriage-next.exe
 .env
 *.log
 *.tsbuildinfo

@@ -368,3 +368,8 @@
 .goal-action-title { flex: 1; text-align: left; min-width: 180px; background: none; border: 0; color: #2c3b33; }
 .goal-action-date { background: #f3f5ef; border: 0; border-radius: 8px; padding: 8px; color: #66765f; }
 .goal-action-date.overdue { color: #ae4d3c; }
+.p-level { display: inline-block; margin-left: 8px; padding: 3px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; background: #edf0ed; color: #526256; }
+.p-level.P0 { background: #ffe4df; color: #982f23; }
+.p-level.P1 { background: #fff0cd; color: #805b12; }
+.p-level.P2 { background: #e1eee6; color: #2f6446; }
+.p-level.P3 { background: #eceff3; color: #5c6573; }
