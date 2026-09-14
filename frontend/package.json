@@ -1,17 +1,18 @@
 {
   "name": "atriage",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "check": "tsc -b",
-    "test": "node --test src/deadline.test.mjs src/plan-input.test.mjs src/goal-view.test.mjs",
+    "test": "node --test src/deadline.test.mjs src/plan-input.test.mjs src/goal-view.test.mjs src/hour-schedule.test.mjs",
     "format": "prettier --write src"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
+    "pdfjs-dist": "^5.4.149",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

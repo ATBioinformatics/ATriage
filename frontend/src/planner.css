@@ -207,6 +207,11 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.plan-direction-button { margin-top: 16px; }
+.plan-direction-editor { border-top: 1px solid #e7ece2; margin-top: 18px; padding-top: 4px; }
+.plan-direction-editor .plan-edit-actions { margin-top: 18px; }
+.plan-input-history { border-top: 1px solid #e7ece2; margin-top: 18px; padding-top: 14px; }
+.plan-input-history > div + div { border-top: 1px dashed #e7ece2; margin-top: 14px; padding-top: 2px; }
 .plan-caveats {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -285,7 +290,10 @@
   gap: 10px;
   margin-bottom: 16px;
 }
+.plan-node-heading-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.danger-button, .plan-node-delete { color: #9d4b3d; border-color: #e7c5bd; }
 .plan-node {
+  position: relative;
   background: white;
   border: 1px solid #dfe6da;
   border-radius: 10px;
@@ -294,8 +302,9 @@
   display: flex;
   gap: 12px;
   align-items: center;
-  padding: 17px;
+  padding: 17px 104px 17px 17px;
 }
+.plan-node-delete { position: absolute; right: 16px; top: 15px; z-index: 1; display: inline-flex; align-items: center; gap: 5px; padding: 6px 9px; font-size: 12px; }
 .plan-node summary > b {
   font-size: 11px;
   color: #7f9178;
@@ -355,6 +364,8 @@
   .plan-total {
     min-width: 65px;
   }
+  .plan-node summary { padding-right: 92px; }
+  .plan-node-delete { right: 10px; top: 13px; }
   .plan-detail-heading h2 {
     font-size: 21px;
   }

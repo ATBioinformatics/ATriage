@@ -196,9 +196,12 @@ func (a *App) replan(w http.ResponseWriter, r *http.Request, id string) {
 		fail(w, 400, "请先将计划撤回草案，再编辑编排")
 		return
 	}
-	if e = validateReplanInput(q.Plan); e != nil {
-		fail(w, 400, e.Error())
-		return
+	emptyPlan := len(q.Plan.Nodes) == 0
+	if !emptyPlan {
+		if e = validateReplanInput(q.Plan); e != nil {
+			fail(w, 400, e.Error())
+			return
+		}
 	}
 	if !a.allow("ai:"+id, 10, time.Minute) {
 		fail(w, 429, "规划请求较多，请一分钟后重试")
@@ -211,7 +214,12 @@ func (a *App) replan(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
-	planned, e := a.generatePlanWithNodes(ctx, original.Input, s.Profile, config, &q.Plan)
+	var planned Plan
+	if emptyPlan {
+		planned, e = a.generatePlan(ctx, original.Input, s.Profile, config)
+	} else {
+		planned, e = a.generatePlanWithNodes(ctx, original.Input, s.Profile, config, &q.Plan)
+	}
 	if e != nil {
 		fail(w, 422, e.Error())
 		return
@@ -225,7 +233,18 @@ func (a *App) replan(w http.ResponseWriter, r *http.Request, id string) {
 			if old.Status != "draft" {
 				return errors.New("计划状态已变化，请刷新")
 			}
-			planned.ID, planned.Title, planned.Input, planned.SourceTaskID, planned.Created = old.ID, q.Plan.Title, old.Input, old.SourceTaskID, old.Created
+			planned.ID, planned.Title, planned.Input, planned.SourceTaskID, planned.Created = old.ID, old.Title, old.Input, old.SourceTaskID, old.Created
+			planned.InputHistory = old.InputHistory
+			for j := range planned.Nodes {
+				for _, n := range old.Nodes {
+					if n.ID == planned.Nodes[j].ID {
+						planned.Nodes[j].Hours = n.Hours
+						planned.Nodes[j].HoursHigh = n.HoursHigh
+						planned.Nodes[j].EstimateBasis = n.EstimateBasis
+						planned.Nodes[j].Refs = n.Refs
+					}
+				}
+			}
 			planned.History = append(old.History, PlanRevision{Kind: "replan", Created: time.Now().UTC().Format(time.RFC3339Nano), Nodes: old.Nodes})
 			s.Plans[i] = planned
 			return nil

@@ -1,0 +1,30 @@
+.draft-assistant { border:1px solid #c7d8cd; border-radius:14px; background:#f8fbf8; margin:20px 0; overflow:hidden; }
+.assistant-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:18px 22px; background:#eaf2eb; color:#264d38; font-size:18px; }
+.assistant-heading small { font-size:12px; font-weight:400; }
+.assistant-body { padding:20px; display:grid; gap:16px; }
+.assistant-run-state { display:flex; align-items:center; gap:8px; margin:0; padding:10px 12px; border-radius:8px; font-size:14px; }
+.assistant-run-state.is-running { background:#e8f2e9; color:#245d38; font-weight:600; }
+.assistant-run-state.is-idle { background:#f1f4f1; color:#617366; }
+.assistant-spinner { width:12px; height:12px; border:2px solid #9dc5a5; border-top-color:#245d38; border-radius:50%; animation: assistant-spin .8s linear infinite; }
+@keyframes assistant-spin { to { transform:rotate(360deg); } }
+.assistant-body textarea { width:100%; box-sizing:border-box; border:1px solid #ccd8ce; border-radius:8px; padding:12px; background:white; min-height:110px; resize:vertical; }
+.assistant-body input[hidden] { display:none; }
+.assistant-body form { display:grid; gap:8px; }
+.assistant-body button { min-height:36px; }
+.chat-actions { display:flex; justify-content:space-between; gap:12px; }
+.assistant-messages { min-height:140px; max-height:48vh; overflow:auto; display:grid; align-content:start; gap:12px; }
+.assistant-message { border-radius:12px; padding:14px 18px; background:white; border:1px solid #e0e7df; }
+.assistant-message.user { background:#eaf1e8; margin-left:24px; }
+.assistant-message p { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.8; margin:6px 0; }
+.assistant-empty { padding:24px; color:#627766; text-align:center; }
+.assistant-warning { background:#fff1df; color:#875314; padding:12px; border-radius:8px; }
+.hour-estimate { padding:16px; background:#edf3ed; border-radius:10px; margin:12px 0; }
+.hour-timeline-row { display:grid; gap:6px; border-bottom:1px solid #d9e3d9; padding:14px 0; }
+.hour-timeline-row small { color:#617366; }
+.plan-detail-with-assistant { display:flex; flex-direction:column; }
+.plan-detail-with-assistant > .draft-assistant { order:-1; width:100%; box-sizing:border-box; }
+.plan-detail-content { width:100%; min-width:0; }
+@media (min-width:1180px) {
+  .plan-detail-with-assistant { display:grid; grid-template-columns:minmax(0,1fr) 380px; gap:20px; align-items:start; }
+  .plan-detail-with-assistant > .draft-assistant { order:0; position:sticky; top:16px; max-height:calc(100vh - 40px); overflow:auto; margin-top:0; }
+}

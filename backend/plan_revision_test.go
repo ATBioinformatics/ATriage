@@ -111,6 +111,28 @@ func TestReplanRejectsAIChangingUserNodes(t *testing.T) {
 	}
 }
 
+func TestReplanRegeneratesWhenUserRemovedAllNodes(t *testing.T) {
+	a := testApp(t)
+	cookie, s := register(t, a, "empty-replan@example.com")
+	model := fixtureModel(t, samplePlan(), "stop")
+	defer model.Close()
+	a.aiBase, a.aiKey, a.aiModel = model.URL, "test", "mimo-test"
+	s = decodePlanState(t, call(t, a, "POST", "/api/plans/generate", map[string]any{
+		"version": s.Version,
+		"input":   PlanInput{Goal: PlanField{Detail: "重新规划学习路径"}},
+	}, cookie))
+	empty := s.Plans[0]
+	empty.Nodes = nil
+	w := call(t, a, "POST", "/api/plans/replan", map[string]any{"version": s.Version, "plan": empty}, cookie)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	next := decodePlanState(t, w)
+	if len(next.Plans[0].Nodes) == 0 || len(next.Plans[0].History) != 1 || len(next.Plans[0].History[0].Nodes) != 3 {
+		t.Fatalf("empty plan was not regenerated: nodes=%d history=%+v", len(next.Plans[0].Nodes), next.Plans[0].History)
+	}
+}
+
 func TestReplanInputAndConcurrentEdit(t *testing.T) {
 	a := testApp(t)
 	cookie, s := register(t, a, "concurrent-replan@example.com")

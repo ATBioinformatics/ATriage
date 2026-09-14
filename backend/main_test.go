@@ -252,6 +252,30 @@ func TestMiMoKeyConfigurationIsEncryptedAndIsolated(t *testing.T) {
 	}
 }
 
+func TestSavedMiMoKeyAlwaysUsesV25Pro(t *testing.T) {
+	a := testApp(t)
+	cookie, _ := register(t, a, "model-normalize@example.com")
+	req := httptest.NewRequest("GET", "/", nil)
+	req.AddCookie(cookie)
+	id, e := a.user(req)
+	if e != nil {
+		t.Fatal(e)
+	}
+	legacy := AIConfig{
+		APIKey:  "tp-existing-token",
+		BaseURL: "https://token-plan-sgp.xiaomimimo.com/v1",
+		Model:   "older-model",
+		Mode:    "older-mode",
+	}
+	if e := a.saveConfig(id, legacy); e != nil {
+		t.Fatal(e)
+	}
+	got, status, e := a.config(id)
+	if e != nil || !status.Configured || got.APIKey != legacy.APIKey || got.BaseURL != legacy.BaseURL || got.Model != "mimo-v2.5-pro" || status.Model != "mimo-v2.5-pro" {
+		t.Fatalf("config=%+v status=%+v err=%v", got, status, e)
+	}
+}
+
 func TestMiMoVerificationUsesBothCompatibleHeaders(t *testing.T) {
 	a := testApp(t)
 	var received bool

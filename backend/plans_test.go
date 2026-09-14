@@ -14,11 +14,26 @@ import (
 )
 
 func samplePlan() Plan {
-	return Plan{Title: "反馈试点", Summary: "先验证流程", Assumptions: []string{"角色和工期待确认"}, Questions: []string{}, Nodes: []PlanNode{
+	p := Plan{Title: "反馈试点", Summary: "先验证流程", Assumptions: []string{"角色和工期待确认"}, Questions: []string{}, Nodes: []PlanNode{
 		{ID: "A", Title: "整理样本", Deliverable: "问题清单", Days: 2, WaitDays: 3, Priority: "high", Mode: "delegate", Owner: "教务", Reason: "可按标准整理", DependsOn: []string{}},
 		{ID: "B", Title: "设计表单", Deliverable: "轻量流程", Days: 2, Priority: "medium", Mode: "delegate", Owner: "教务", Reason: "熟悉执行", DependsOn: []string{}},
 		{ID: "C", Title: "确定方案", Deliverable: "确认方案", Days: 1, Priority: "high", Mode: "self", Owner: "我", Reason: "需要决策", DependsOn: []string{"A", "B"}},
 	}}
+	for i := range p.Nodes {
+		p.Nodes[i].PLevel = "P1"
+	}
+	return p
+}
+func TestGenerationRejectsMissingPLevel(t *testing.T) {
+	p := samplePlan()
+	p.Nodes[1].PLevel = ""
+	server := fixtureModel(t, p, "stop")
+	defer server.Close()
+	a := testApp(t)
+	_, err := a.generatePlan(context.Background(), PlanInput{Goal: PlanField{Detail: "目标"}}, Profile{}, AIConfig{BaseURL: server.URL, APIKey: "test", Model: "mimo-test"})
+	if err == nil || !strings.Contains(err.Error(), "P0—P3") {
+		t.Fatalf("missing priority accepted: %v", err)
+	}
 }
 func TestPlanScheduleWaitResourcesAndCriticalPath(t *testing.T) {
 	p := samplePlan()
@@ -63,6 +78,29 @@ func TestPlanInputOnlyGoalRequired(t *testing.T) {
 	in.Resources.Detail = strings.Repeat("字", 2001)
 	if checkInput(&in) == nil {
 		t.Fatal("oversize accepted")
+	}
+}
+
+func TestPlanDirectionsCanBeAdjustedWithoutChangingAcceptedTasks(t *testing.T) {
+	a := testApp(t)
+	c, s := register(t, a, "direction@example.com")
+	model := fixtureModel(t, samplePlan(), "stop")
+	defer model.Close()
+	a.aiBase, a.aiKey, a.aiModel = model.URL, "test", "mimo-test"
+	s = decodePlanState(t, call(t, a, "POST", "/api/plans/generate", map[string]any{
+		"version": s.Version, "input": PlanInput{Goal: PlanField{Detail: "改善反馈"}},
+	}, c))
+	p := s.Plans[0]
+	s = decodePlanState(t, call(t, a, "POST", "/api/plans/accept", map[string]any{"version": s.Version, "planId": p.ID}, c))
+	before := append([]Task(nil), s.Tasks...)
+	next := PlanInput{Goal: PlanField{Choices: []string{"建立新机制"}, Detail: "建立长期反馈机制"}, Timing: PlanField{Choices: []string{"本月有初步成果"}}}
+	s = decodePlanState(t, call(t, a, "POST", "/api/plans/input", map[string]any{"version": s.Version, "planId": p.ID, "input": next}, c))
+	got := s.Plans[0]
+	if got.Input.Goal.Detail != next.Goal.Detail || len(got.InputHistory) != 1 || got.InputHistory[0].Input.Goal.Detail != "改善反馈" {
+		t.Fatalf("direction history was not preserved: %+v", got)
+	}
+	if len(s.Tasks) != len(before) || s.Tasks[1].ID != before[1].ID || s.Tasks[1].Title != before[1].Title {
+		t.Fatal("editing directions must not alter accepted tasks")
 	}
 }
 func fixtureModel(t *testing.T, p Plan, finish string) *httptest.Server {
