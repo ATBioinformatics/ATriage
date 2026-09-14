@@ -21,8 +21,13 @@ import {
   KeyRound,
 } from "lucide-react";
 import "./style.css";
+import { Planner, type Plan } from "./Planner";
+import { goalView } from "./goal-view";
 
 type Task = {
+  planId?: string;
+  nodeId?: string;
+  dependencies?: string[];
   id: string;
   title: string;
   notes: string;
@@ -45,6 +50,8 @@ type Profile = {
   onboarded: boolean;
 };
 type State = {
+  goalOrder?: string[];
+  plans?: Plan[];
   version: number;
   profile: Profile;
   tasks: Task[];
@@ -145,7 +152,7 @@ function App() {
     [view, setView] = useState("open"),
     [settings, setSettings] = useState(false),
     [editing, setEditing] = useState<Task | null>(null),
-    [preview, setPreview] = useState<{ version: number; s: Suggestion } | null>(
+    [preview, setPreview] = useState<{ version: number; s: Suggestion; scope?: string } | null>(
       null,
     ),
     [message, setMessage] = useState(""),
@@ -155,6 +162,7 @@ function App() {
     [now, setNow] = useState(Date.now()),
     [query, setQuery] = useState("");
   const live = useRef(state);
+  const [openPlan, setOpenPlan] = useState<{id: string; key: number}>();
   live.current = state;
   const session = useRef(0);
   useEffect(() => {
@@ -203,13 +211,14 @@ function App() {
       setBusy(false);
     }
   }
-  async function suggest(s: State, taskId = "") {
+  async function suggest(s: State, taskId = "", scope = "") {
     const generation = session.current;
     setThinking((n) => n + 1);
     try {
       const r = await api<SuggestResult>("/suggest", {
         version: s.version,
         taskId,
+        scope,
       });
       if (generation !== session.current) return;
       if (taskId) {
@@ -219,7 +228,7 @@ function App() {
         } else {
           setMessage("任务已保存；列表已变化，旧建议没有覆盖你的操作。");
         }
-      } else setPreview({ version: r.version, s: r.suggestion });
+      } else setPreview({ version: r.version, s: r.suggestion, scope });
     } catch (e) {
       if (generation === session.current) await failure(e);
     } finally {
@@ -288,16 +297,30 @@ function App() {
   const all = state.order
     .map((id) => state.tasks.find((t) => t.id === id)!)
     .filter(Boolean);
+  const goals = goalView(state.plans || [], state.tasks);
+  goals.groups.sort((a, b) => {
+    const position = (g: typeof a) => {
+      const saved = state.goalOrder?.indexOf(g.plan.id) ?? -1;
+      if (saved >= 0) return saved - (state.goalOrder?.length || 0);
+      const ids = new Set([g.source?.id, ...g.children.map(t => t.id)]);
+      const index = state.order.findIndex(id => ids.has(id));
+      return index < 0 ? state.order.length : index;
+    };
+    return position(a) - position(b);
+  });
+  const groups = goals.groups.filter(g => [g.plan.title, g.source?.title, ...g.children.map(t => t.title)].some(t => t?.toLowerCase().includes(query.toLowerCase())));
+  const visibleCount = goals.groups.length + goals.standalone.length;
+  const actionable = [...goals.standalone, ...goals.groups.flatMap(g => g.ready)];
   const tasks = (
     view === "open"
-      ? all
+      ? all.filter(t => goals.standalone.some(x => x.id === t.id))
       : state.tasks
           .filter((t) => t.status !== "open")
           .slice()
           .reverse()
   ).filter((t) => t.title.toLowerCase().includes(query.toLowerCase()));
-  const overdue = all.filter((t) => due(t, now) === "overdue").length,
-    soon = all.filter((t) => due(t, now) === "soon").length;
+  const overdue = actionable.filter((t) => due(t, now) === "overdue").length,
+    soon = actionable.filter((t) => due(t, now) === "soon").length;
   return (
     <div className="shell">
       <aside>
@@ -308,7 +331,10 @@ function App() {
           onClick={() => setView("open")}
         >
           <ListTodo size={19} />
-          我的待办<span>{all.length}</span>
+          我的待办<span>{visibleCount}</span>
+        </button>
+        <button className={"nav " + (view === "plans" ? "selected" : "")} onClick={() => setView("plans")}>
+          <Sparkles size={19} />目标计划<span>v0.2</span>
         </button>
         <button
           className={"nav " + (view === "archive" ? "selected" : "")}
@@ -362,7 +388,7 @@ function App() {
               ? "行动列表"
               : view === "api"
                 ? "AI API 配置"
-                : "归档记录"}
+                : view === "plans" ? "目标计划" : "归档记录"}
           </span>
           <span
             className={"connection " + (aiConfig?.configured ? "ready" : "")}
@@ -387,24 +413,24 @@ function App() {
                   ? "下一步，更清晰。"
                   : view === "api"
                     ? "让 AI 接手排序，其他交给我。"
-                    : "每一步，都有记录。"}
+                    : view === "plans" ? "大目标，从这里开始。" : "每一步，都有记录。"}
               </h1>
               <p className="subtitle">
                 {view === "open"
                   ? "从一件小事开始，按你的节奏推进重要的工作。"
                   : view === "api"
                     ? "粘贴一次 MiMo API Key，之后 ATriage 会自动判断接入方式。"
-                    : "完成与决定不做分别保存，随时可以恢复。"}
+                    : view === "plans" ? "梳理行动路径，安排投入，把握需要你介入的节点。" : "完成与决定不做分别保存，随时可以恢复。"}
               </p>
             </div>
-            <span className="edition">ATriage / 1.0</span>
+            <span className="edition">ATriage / v0.2</span>
           </div>
-          {view !== "api" && (
+          {view !== "api" && view !== "plans" && (
             <>
               <div className="stats">
                 <div>
                   <span>待推进</span>
-                  <b>{all.length.toString().padStart(2, "0")}</b>
+                  <b>{visibleCount.toString().padStart(2, "0")}</b>
                   <small>按你的顺序</small>
                 </div>
                 <div>
@@ -461,13 +487,20 @@ function App() {
               save={saveTask}
             />
           )}
-          {view !== "api" && (
+          <div hidden={view !== "plans"}>
+            <Planner editTask={id => {const t = state.tasks.find(t => t.id === id); if (t) setEditing({...t});}} openRequest={openPlan} plans={state.plans || []} tasks={state.tasks} busy={busy} configured={!!aiConfig?.configured} configure={() => setView("api")} run={async (path, body, method) => {
+              const generation = session.current;
+              const result = await write(() => api<State>(path, { ...(body as object), version: live.current!.version }, method));
+              if (result && generation === session.current) { adopt(result); return result.plans || []; }
+            }} />
+          </div>
+          {view !== "api" && view !== "plans" && (
             <>
               <div className="list-toolbar">
                 <div>
                   <h2>{view === "open" ? "行动清单" : "归档记录"}</h2>
                   <span>
-                    {tasks.length} 项{thinking > 0 ? " · 正在获取建议…" : ""}
+                    {tasks.length + (view === "open" ? groups.length : 0)} 项{thinking > 0 ? " · 正在获取建议…" : ""}
                   </span>
                 </div>
                 <div className="tools">
@@ -480,26 +513,45 @@ function App() {
                   {view === "open" && (
                     <button
                       className="secondary"
-                      disabled={busy || thinking > 0 || !all.length}
-                      onClick={() => suggest(state)}
+                      disabled={busy || thinking > 0 || !goals.groups.length}
+                      onClick={() => suggest(state, "", "goals")}
                     >
                       <Sparkles size={15} />
-                      查看 AI 重排建议
+                      AI 重排大项目
                     </button>
                   )}
                 </div>
               </div>
               {view === "open" && (
                 <div className="list-caption">
-                  <span>顺序 / 任务</span>
-                  <span>重要程度与截止状态</span>
+                  <span>{goals.groups.length ? "目标 / 当前可执行行动" : "顺序 / 任务"}</span>
+                  <span>{goals.groups.length ? "行动截止日" : "重要程度与截止状态"}</span>
                 </div>
               )}
               <div className="task-list">
+                {view === "open" && groups.map(g => (
+                  <section className="goal-action-card" key={g.plan.id}>
+                    <header>
+                      <button className="goal-link" onClick={() => {setOpenPlan({id: g.plan.id, key: Date.now()}); setView("plans");}}>
+                        <strong>{g.source?.title || g.plan.title}</strong><span>查看目标计划 ↗</span>
+                      </button>
+                      <small>{g.plan.status === "draft" ? "草案 · 确认后开始执行" : `已完成 ${g.done} / ${g.children.length}`}{g.source?.deadline ? ` · 目标截止 ${g.source.deadline.replace("T", " ")}` : ""}</small>
+                    </header>
+                    <div className="goal-next-label">当前下一步{g.ready.length > 1 || g.preview.length > 1 ? " · 可并行推进" : ""}</div>
+                    {g.ready.map(t => <div className="goal-next-action" key={t.id}>
+                      <button className="icon" aria-label={`完成 ${t.title}`} disabled={busy} onClick={() => saveTask({...t, status: "done"})}><Circle size={19}/></button>
+                      <button className="goal-action-title" onClick={() => setEditing({...t})}>{t.nodeId} · {t.title}</button>
+                      <button className={"goal-action-date " + due(t, now)} onClick={() => setEditing({...t})}>{t.deadline ? `截止 ${t.deadline.replace("T", " ")}` : "设置行动截止日"}</button>
+                    </div>)}
+                    {g.preview.map(n => <div className="goal-next-action" key={n.id}><span>{n.id} · {n.title}</span><small>待确认 · 截止日未设置</small></div>)}
+                    {!g.ready.length && !g.preview.length && <p>{g.done === g.children.length && g.children.length ? "执行项已全部完成。" : "暂无可执行行动，请在计划中检查前置任务（跳过不等于完成）。"}</p>}
+                  </section>
+                ))}
                 {tasks.map((t) => (
                   <TaskRow
                     key={t.id}
                     task={t}
+                    blocked={(t.dependencies || []).filter(id => state.tasks.find(x => x.id === id)?.status !== "done").map(id => state.tasks.find(x => x.id === id)?.title || "前置任务")}
                     rank={state.order.indexOf(t.id) + 1}
                     total={all.length}
                     now={now}
@@ -509,7 +561,7 @@ function App() {
                     save={saveTask}
                   />
                 ))}
-                {!tasks.length && (
+                {!tasks.length && !(view === "open" && groups.length) && (
                   <div className="empty">
                     <div>
                       <ListTodo size={30} />
@@ -589,10 +641,10 @@ function App() {
             <Sparkles size={18} />
             {preview.s.notice}
           </div>
-          <p className="muted">以下是预览。应用之前，实际列表不会改变。</p>
+          <p className="muted">{preview.scope === "goals" ? "仅调整大项目的展示顺序；项目内的小任务、依赖与截止日保持不变。" : "以下是预览。应用之前，实际列表不会改变。"}</p>
           <div className="preview-list">
             {preview.s.order.map((id, i) => {
-              const t = state.tasks.find((t) => t.id === id);
+              const t = preview.scope === "goals" ? state.plans?.find(p => p.id === id) : state.tasks.find((t) => t.id === id);
               return (
                 t && (
                   <article key={id}>
@@ -617,7 +669,7 @@ function App() {
                 const s = await write(() =>
                   api<State>(
                     "/order",
-                    { version: preview.version, order: preview.s.order },
+                    { version: preview.version, order: preview.s.order, scope: preview.scope },
                     "PUT",
                   ),
                 );
@@ -829,7 +881,7 @@ function Auth({
             </div>
           </div>
         </div>
-        <small>ATriage 1.0 · 为有判断力的人提供行动建议</small>
+        <small>ATriage v0.2 · 为有判断力的人提供行动建议</small>
       </section>
       <section className="auth-form">
         <div>
@@ -1363,6 +1415,7 @@ function TaskComposer({
 }
 function TaskRow({
   task: t,
+  blocked,
   rank,
   total,
   now,
@@ -1372,6 +1425,7 @@ function TaskRow({
   save,
 }: {
   task: Task;
+  blocked: string[];
   rank: number;
   total: number;
   now: number;
@@ -1431,7 +1485,8 @@ function TaskRow({
             />
             <button
               className="complete icon"
-              disabled={busy}
+              disabled={busy || blocked.length > 0}
+              title={blocked.length ? "等待：" + blocked.join("、") : "完成任务"}
               aria-label={`完成${t.title}`}
               onClick={() => save({ ...t, status: "done" })}
             >
@@ -1445,6 +1500,7 @@ function TaskRow({
         )}
         <button className="task-title" onClick={() => setExpanded(!expanded)}>
           <strong>{t.title}</strong>
+          {t.status === "open" && blocked.length > 0 && <small className="warning">等待前置任务：{blocked.join("、")}</small>}
           <span>
             {t.status === "done"
               ? "已完成"

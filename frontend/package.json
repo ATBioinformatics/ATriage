@@ -1,13 +1,13 @@
 {
   "name": "atriage",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "check": "tsc -b",
-    "test": "node --test src/deadline.test.mjs",
+    "test": "node --test src/deadline.test.mjs src/plan-input.test.mjs src/goal-view.test.mjs",
     "format": "prettier --write src"
   },
   "dependencies": {

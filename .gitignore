@@ -6,3 +6,4 @@ backend/atriage.exe
 *.log
 *.tsbuildinfo
 .tmp/
+.recovery-trash/
