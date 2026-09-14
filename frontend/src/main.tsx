@@ -309,7 +309,8 @@ function App() {
     return position(a) - position(b);
   });
   const groups = goals.groups.filter(g => [g.plan.title, g.source?.title, ...g.children.map(t => t.title)].some(t => t?.toLowerCase().includes(query.toLowerCase())));
-  const visibleCount = goals.groups.length + goals.standalone.length;
+  const projectCandidates = goals.groups.length + goals.standalone.length;
+  const visibleCount = projectCandidates;
   const actionable = [...goals.standalone, ...goals.groups.flatMap(g => g.ready)];
   const tasks = (
     view === "open"
@@ -318,7 +319,24 @@ function App() {
           .filter((t) => t.status !== "open")
           .slice()
           .reverse()
-  ).filter((t) => t.title.toLowerCase().includes(query.toLowerCase()));
+  ).filter((t) => t.title.toLowerCase().includes(query.toLowerCase())).sort((a, b) => {
+    if (view !== "open") return 0;
+    const position = (id: string) => {
+      const saved = state.goalOrder?.indexOf(id) ?? -1;
+      return saved >= 0 ? saved : state.order.indexOf(id) + (state.goalOrder?.length || 0);
+    };
+    return position(a.id) - position(b.id);
+  });
+  const projectItems = [
+    ...groups.map(g => ({ kind: "plan" as const, id: g.plan.id, group: g })),
+    ...tasks.map(t => ({ kind: "task" as const, id: t.id, task: t })),
+  ].sort((a, b) => {
+    const position = (id: string) => {
+      const saved = state.goalOrder?.indexOf(id) ?? -1;
+      return saved >= 0 ? saved : state.order.indexOf(id) + (state.goalOrder?.length || 0);
+    };
+    return position(a.id) - position(b.id);
+  });
   const overdue = actionable.filter((t) => due(t, now) === "overdue").length,
     soon = actionable.filter((t) => due(t, now) === "soon").length;
   return (
@@ -513,7 +531,7 @@ function App() {
                   {view === "open" && (
                     <button
                       className="secondary"
-                      disabled={busy || thinking > 0 || !goals.groups.length}
+                      disabled={busy || thinking > 0 || !projectCandidates}
                       onClick={() => suggest(state, "", "goals")}
                     >
                       <Sparkles size={15} />
@@ -529,8 +547,9 @@ function App() {
                 </div>
               )}
               <div className="task-list">
-                {view === "open" && groups.map(g => (
-                  <section className="goal-action-card" key={g.plan.id}>
+                {view === "open" && projectItems.map(item => item.kind === "plan" ? (() => {
+                  const g = item.group;
+                  return <section className="goal-action-card" key={g.plan.id}>
                     <header>
                       <button className="goal-link" onClick={() => {setOpenPlan({id: g.plan.id, key: Date.now()}); setView("plans");}}>
                         <strong>{g.source?.title || g.plan.title}</strong><span>查看目标计划 ↗</span>
@@ -545,21 +564,23 @@ function App() {
                     </div>)}
                     {g.preview.map(n => <div className="goal-next-action" key={n.id}><span>{n.id} · {n.title}</span><small>待确认 · 截止日未设置</small></div>)}
                     {!g.ready.length && !g.preview.length && <p>{g.done === g.children.length && g.children.length ? "执行项已全部完成。" : "暂无可执行行动，请在计划中检查前置任务（跳过不等于完成）。"}</p>}
-                  </section>
-                ))}
-                {tasks.map((t) => (
+                  </section>;
+                })() : (
                   <TaskRow
-                    key={t.id}
-                    task={t}
-                    blocked={(t.dependencies || []).filter(id => state.tasks.find(x => x.id === id)?.status !== "done").map(id => state.tasks.find(x => x.id === id)?.title || "前置任务")}
-                    rank={state.order.indexOf(t.id) + 1}
-                    total={all.length}
+                    key={item.task.id}
+                    task={item.task}
+                    blocked={(item.task.dependencies || []).filter(id => state.tasks.find(x => x.id === id)?.status !== "done").map(id => state.tasks.find(x => x.id === id)?.title || "前置任务")}
+                    rank={projectItems.findIndex(x => x.id === item.id) + 1}
+                    total={projectItems.length}
                     now={now}
                     busy={busy}
                     move={move}
-                    edit={() => setEditing({ ...t })}
+                    edit={() => setEditing({ ...item.task })}
                     save={saveTask}
                   />
+                ))}
+                {view !== "open" && tasks.map((t) => (
+                  <TaskRow key={t.id} task={t} blocked={(t.dependencies || []).filter(id => state.tasks.find(x => x.id === id)?.status !== "done").map(id => state.tasks.find(x => x.id === id)?.title || "前置任务")} rank={state.order.indexOf(t.id) + 1} total={all.length} now={now} busy={busy} move={move} edit={() => setEditing({ ...t })} save={saveTask} />
                 ))}
                 {!tasks.length && !(view === "open" && groups.length) && (
                   <div className="empty">
@@ -641,10 +662,10 @@ function App() {
             <Sparkles size={18} />
             {preview.s.notice}
           </div>
-          <p className="muted">{preview.scope === "goals" ? "仅调整大项目的展示顺序；项目内的小任务、依赖与截止日保持不变。" : "以下是预览。应用之前，实际列表不会改变。"}</p>
+          <p className="muted">{preview.scope === "goals" ? "会预排目标计划和未拆解的顶层任务；没有截止日的项目也会参考你的规则参与排序。项目内的小任务、依赖与截止日保持不变。" : "以下是预览。应用之前，实际列表不会改变。"}</p>
           <div className="preview-list">
             {preview.s.order.map((id, i) => {
-              const t = preview.scope === "goals" ? state.plans?.find(p => p.id === id) : state.tasks.find((t) => t.id === id);
+              const t = preview.scope === "goals" ? state.plans?.find(p => p.id === id) || state.tasks.find(t => t.id === id) : state.tasks.find((t) => t.id === id);
               return (
                 t && (
                   <article key={id}>
